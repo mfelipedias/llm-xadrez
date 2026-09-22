@@ -12,10 +12,12 @@ npm install
 npm run dev        # servidor em http://localhost:3939 + Vite em http://localhost:5173
 # ou, em produção:
 npm run build && npm start   # tudo em http://localhost:3939
+# ou com Docker:
+docker compose up -d --build # http://localhost:3939, dados em ./data (ver docs/08)
 ```
 
 Endpoint MCP: `http://localhost:3939/mcp`. Como conectar Claude Code / Claude Desktop /
-outros: [docs/05-conectar-clientes.md](docs/05-conectar-clientes.md).
+Jan / Codex / ChatGPT / outros: [docs/05-conectar-clientes.md](docs/05-conectar-clientes.md).
 
 No chat: *"vamos jogar xadrez, eu de brancas, me ensine enquanto jogamos"*.
 

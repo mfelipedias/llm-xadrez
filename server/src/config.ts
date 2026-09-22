@@ -59,7 +59,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const dataDir = path.isAbsolute(dataDirRaw) ? dataDirRaw : path.resolve(ROOT_DIR, dataDirRaw);
   const anyHost = host === "0.0.0.0" || host === "::" || host === "127.0.0.1" || host === "::1";
   const displayHost = anyHost ? "localhost" : host;
-  const baseUrl = `http://${displayHost}:${port}`;
+  // PUBLIC_URL: URL pela qual os clientes alcançam o servidor (ex.: Docker com outra porta
+  // no host, túnel). Só afeta as URLs exibidas/anunciadas, não o bind.
+  const publicUrl = (env.PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
+  const baseUrl = publicUrl || `http://${displayHost}:${port}`;
   return {
     port,
     host,

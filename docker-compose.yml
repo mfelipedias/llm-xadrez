@@ -14,6 +14,8 @@ services:
       HUMAN_NAME: ${HUMAN_NAME:-Você}
       # Defina no .env para exigir "Authorization: Bearer <token>" em /mcp (útil ao expor por túnel).
       MCP_TOKEN: ${MCP_TOKEN:-}
+      # URL anunciada aos clientes (banner, /api/health, UI). Mude se trocar a porta do host.
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3939}
     volumes:
       # Partidas e estado atual persistem fora do container.
       - ./data:/app/data

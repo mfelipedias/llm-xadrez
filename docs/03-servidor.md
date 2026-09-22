@@ -11,6 +11,7 @@
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` \| `silent` |
 | `MCP_TOKEN` | (vazio) | se definido, `/mcp` exige `Authorization: Bearer <token>` |
 | `HUMAN_NAME` | `Você` | nome padrão do humano |
+| `PUBLIC_URL` | (vazio) | URL pela qual os clientes alcançam o servidor; só afeta o que é exibido/anunciado (banner, `/api/health.mcpUrl`, UI). Vazio = `http://localhost:PORT`. Use no Docker com outra porta no host ou atrás de túnel |
 
 ## GameStore (`server/src/game/store.ts`)
 

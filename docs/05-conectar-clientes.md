@@ -29,6 +29,46 @@ Opção B — ponte stdio com `mcp-remote` em `claude_desktop_config.json`
 ```
 Reiniciar o Claude Desktop. As tools aparecem no ícone de ferramentas do chat.
 
+## Jan (jan.ai)
+Jan aceita servidores MCP HTTP direto. Em `%APPDATA%\Jan\data\mcp_config.json`, dentro
+de `mcpServers`:
+```json
+"xadrez": {
+  "active": true,
+  "type": "http",
+  "url": "http://localhost:3939/mcp",
+  "command": "", "args": [], "env": {}, "headers": {}
+}
+```
+Ou pela UI: Settings → MCP Servers → Add → tipo HTTP, URL acima. Reinicie o Jan (ou
+desligue/ligue o servidor na lista). Dica: `toolCallTimeoutSeconds` em `mcpSettings` deve
+ser ≥ 120 para o `wait_for_turn` não ser abortado. Modelos locais pequenos podem ter tool
+calling fraco; prefira um modelo com suporte a tools (ex.: Qwen, Llama 3.x instruct).
+
+## OpenAI Codex (app desktop / CLI)
+Em `~/.codex/config.toml`:
+```toml
+[mcp_servers.xadrez]
+url = "http://localhost:3939/mcp"
+startup_timeout_sec = 30
+tool_timeout_sec = 180
+```
+Conferir com `codex mcp list` (deve listar `xadrez` como `enabled`). Reinicie o app Codex.
+
+## ChatGPT (web)
+O ChatGPT só aceita conectores MCP por **URL pública** e sem header customizado, então:
+1. Deixe `MCP_TOKEN` vazio no `.env` enquanto joga (o servidor rejeitaria sem o header).
+2. Abra um túnel: `npx cloudflared tunnel --url http://localhost:3939` e copie a URL `https://...`.
+3. No ChatGPT: Settings → Apps & Connectors → Advanced settings → Developer mode → Create,
+   URL `https://<túnel>/mcp`, autenticação "None".
+4. Feche o túnel ao terminar (a UI e o MCP ficam expostos enquanto ele estiver aberto).
+
+## Docker
+Com `docker compose up -d --build` (ver docs/08), o endpoint é o mesmo
+`http://localhost:3939/mcp` e todas as configurações acima valem sem mudança. Se mapear
+outra porta no host, defina `PUBLIC_URL=http://localhost:<porta>` para o servidor anunciar
+a URL certa no banner, no `/api/health` e na UI.
+
 ## Outros clientes (Cursor, Windsurf, Cline, Continue, etc.)
 Qualquer cliente com suporte a "remote/HTTP MCP": URL `http://localhost:3939/mcp`.
 Clientes só-stdio: mesma ponte `npx -y mcp-remote http://localhost:3939/mcp --allow-http`.

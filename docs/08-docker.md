@@ -27,8 +27,9 @@ Variáveis vêm do `docker-compose.yml`; `HUMAN_NAME` e `MCP_TOKEN` podem ser de
 Express do SDK; como a porta só é publicada em `localhost` por padrão, isso não muda o
 risco. Para expor na rede/túnel, defina `MCP_TOKEN`.
 
-Para mudar a porta no host: `"4000:3939"` em `ports` (a URL do MCP passa a ser
-`http://localhost:4000/mcp`).
+Para mudar a porta no host: `"4000:3939"` em `ports` e `PUBLIC_URL=http://localhost:4000`
+no `.env` (a URL do MCP passa a ser `http://localhost:4000/mcp`, e o servidor anuncia a
+URL certa no banner, no `/api/health` e na UI).
 
 ## Desenvolvimento com Docker
 O container é de produção (serve `web/dist`). Para desenvolver com hot reload, use
