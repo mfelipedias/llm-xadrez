@@ -1,0 +1,20 @@
+services:
+  xadrez:
+    build: .
+    image: llm-xadrez:latest
+    container_name: llm-xadrez
+    ports:
+      # UI, API, WebSocket e MCP na mesma porta: http://localhost:3939 e http://localhost:3939/mcp
+      - "3939:3939"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3939
+      DATA_DIR: /app/data
+      LANG: pt-BR
+      HUMAN_NAME: ${HUMAN_NAME:-Você}
+      # Defina no .env para exigir "Authorization: Bearer <token>" em /mcp (útil ao expor por túnel).
+      MCP_TOKEN: ${MCP_TOKEN:-}
+    volumes:
+      # Partidas e estado atual persistem fora do container.
+      - ./data:/app/data
+    restart: unless-stopped
