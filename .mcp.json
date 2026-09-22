@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "xadrez": {
+      "type": "http",
+      "url": "http://localhost:3939/mcp"
+    }
+  }
+}

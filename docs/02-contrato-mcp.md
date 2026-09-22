@@ -1,0 +1,203 @@
+# 02 — Contrato MCP (ferramentas, prompt, recursos)
+
+Endpoint: `POST http://localhost:3939/mcp` (Streamable HTTP, sessões com estado).
+Servidor MCP: `name: "llm-xadrez"`, `version` do package.json.
+Tipos referenciados: `shared/types.ts` (`GameState`, `TurnEvent`, ...).
+
+## Convenções gerais
+
+- Nomes de tools e parâmetros em **inglês** (padrão de tool calling). Textos devolvidos
+  (estado formatado, mensagens de erro didáticas) em **português**, configurável por
+  `LANG=pt-BR|en` no `.env` (v1 só precisa de pt-BR; deixar o formatador preparado).
+- **Toda resposta** de tool devolve:
+  - `content[0]` = `{ type: "text", text: <estado formatado para LLM> }` (ver formato abaixo);
+  - `structuredContent` = JSON (`GameState` completo ou `TurnEvent & { state: GameState }`).
+  - Tools devem declarar `outputSchema` (zod) para o `structuredContent`.
+- **Erros de regra** (lance ilegal, não é sua vez, assento ocupado) **não** lançam exceção:
+  retornam `isError: true` com texto explicando e, se aplicável, a lista de lances legais.
+  Só erros inesperados viram exceção.
+- Toda tool que muda o estado faz broadcast WS e acorda `wait_for_turn` do outro assento.
+- Toda chamada de tool atualiza `seats[minhaCor].lastSeenAt` se a sessão estiver sentada.
+
+## Ferramentas
+
+### `new_game`
+Cria uma nova partida (encerra a atual, salvando o PGN em `data/games/`) e senta a sessão
+chamadora na cor escolhida.
+
+| Parâmetro | Tipo | Default | Descrição |
+|-----------|------|---------|-----------|
+| `my_color` | `"white" \| "black" \| "random"` | `"black"` | cor que a LLM vai jogar |
+| `opponent` | `"human" \| "llm"` | `"human"` | `human`: o outro assento é do navegador. `llm`: fica vazio aguardando `join_game` de outra sessão |
+| `my_name` | string | `"Claude"` | nome exibido na UI |
+| `opponent_name` | string | `"Você"` | nome do humano (ignorado se `opponent = "llm"`) |
+| `start_fen` | string | posição inicial | para estudar uma posição específica (aula, final, puzzle) |
+
+Retorna o estado. Se for a vez da LLM (`my_color = white` na posição inicial), o texto diz
+"É sua vez: chame make_move". Se `opponent = "llm"`, diz "Aguardando outra LLM entrar com
+join_game(color: 'black'). Chame wait_for_turn."
+
+### `join_game`
+Entra na partida atual num assento livre (ou retoma o seu).
+
+| Parâmetro | Tipo | Default | Descrição |
+|-----------|------|---------|-----------|
+| `color` | `"white" \| "black"` | o assento livre (erro se os dois estiverem livres ou ocupados) | |
+| `my_name` | string | `"Claude"` | |
+| `force` | boolean | `false` | toma o assento mesmo que outra sessão MCP esteja ativa nele |
+
+Regras de retomada: se o assento é `mcp` e a sessão dona está fechada ou sem atividade há
+> 120 s, ou se `my_name` é igual ao nome do assento, `join_game` retoma sem `force`.
+Se o assento é `human`, `join_game` **converte para mcp** apenas com `force: true`
+(o humano vira espectador). Gera evento `opponent_joined` para o outro assento.
+
+### `get_state`
+Sem parâmetros. Retorna o estado atual formatado + JSON. Use quando quiser "olhar o
+tabuleiro" sem esperar nada. Também entrega mensagens humanas pendentes.
+
+### `make_move`
+Joga um lance pela cor da sessão chamadora.
+
+| Parâmetro | Tipo | Descrição |
+|-----------|------|-----------|
+| `move` | string | SAN (`"Nf3"`, `"exd5"`, `"O-O"`, `"e8=Q"`) ou UCI (`"g1f3"`, `"e7e8q"`). Aceita variações comuns: `"0-0"`, `"Nf3+"` sem xeque real, `"nf3"` minúsculo (normalizar) |
+| `comment` | string? | comentário do professor exibido junto com o lance ("Ataco o cavalo e preparo o roque") |
+| `comment_category` | `CommentCategory`? | default `"plan"` |
+
+Validação: sessão deve estar sentada; deve ser sua vez; partida ativa; lance legal.
+Erro de lance ilegal retorna `isError: true` com:
+```
+Lance ilegal: "Nf5". Motivos possíveis: nenhum cavalo alcança f5.
+Lances legais agora (24): Nf3, Nc3, e4, e3, d4, d3, ... (capturas marcadas com x, xeques com +)
+```
+Sucesso retorna o estado com o lance aplicado e o texto:
+"Você jogou 12...Nf6. Agora é a vez das BRANCAS (Felipe). Chame wait_for_turn."
+Se o lance termina a partida: "Xeque-mate! Você venceu (0-1). Partida encerrada."
+
+### `wait_for_turn`
+Bloqueia até acontecer algo relevante para a sessão chamadora ou até o timeout.
+
+| Parâmetro | Tipo | Default | Descrição |
+|-----------|------|---------|-----------|
+| `timeout_seconds` | number | `60` | máximo `120` (limites de timeout dos clientes MCP) |
+
+Retorna `TurnEvent & { state }`:
+- `your_turn` — é sua vez e o oponente está sentado (retorna imediatamente se já for).
+- `opponent_moved` — inclui `opponentMove` (SAN, de/para, captura, xeque).
+- `message` — humano enviou mensagem para você ou para todos (`messages[]`). Pode não ser
+  sua vez: responda no chat e chame `wait_for_turn` de novo.
+- `takeback` — lances desfeitos; olhe o estado e continue.
+- `opponent_joined`, `new_game` — situação mudou; releia o estado.
+- `game_over` — resultado e motivo.
+- `timeout` — nada aconteceu. Texto: "Nada aconteceu em 60 s. Chame wait_for_turn de novo
+  (ou converse com o aluno)".
+- `not_seated` — chame `new_game` ou `join_game`.
+
+Eventos são enfileirados **por assento**; `wait_for_turn` drena a fila e, se houver mais
+de um evento, retorna o mais importante (`game_over` > `opponent_moved` > `your_turn` >
+`takeback` > `new_game` > `opponent_joined` > `message`) com todos os `messages` juntos.
+Nunca perde eventos que aconteceram enquanto a LLM não estava esperando.
+
+### `comment`
+Envia um comentário de professor sem jogar.
+
+| Parâmetro | Tipo | Descrição |
+|-----------|------|-----------|
+| `text` | string | o comentário (markdown simples permitido) |
+| `category` | `CommentCategory`? | default `"lesson"` |
+| `highlight` | `{ squares?: string[] \| {square,color}[], arrows?: {from,to,color?}[] }`? | desenho anexado |
+
+Retorna o estado (curto). Não muda a vez.
+
+### `highlight`
+Desenha no tabuleiro (substitui o destaque anterior).
+
+| Parâmetro | Tipo | Descrição |
+|-----------|------|-----------|
+| `squares` | `(string \| {square, color})[]`? | casas a destacar |
+| `arrows` | `{from, to, color?}[]`? | setas |
+| `clear` | boolean? | apaga tudo (ignora os outros campos) |
+
+Cores aceitas: qualquer CSS color; sugerir `"green"`, `"red"`, `"blue"`, `"yellow"`.
+A UI limpa o destaque automaticamente quando um lance é jogado.
+
+### `takeback`
+Desfaz lances (para corrigir um erro do aluno ou refazer uma posição de aula).
+
+| Parâmetro | Tipo | Default |
+|-----------|------|---------|
+| `plies` | number (1–10) | `2` |
+
+Retorna estado. Gera evento `takeback` para o oponente.
+
+### `end_game`
+| Parâmetro | Tipo | Descrição |
+|-----------|------|-----------|
+| `how` | `"resign" \| "draw" \| "abort"` | `resign`: a cor da sessão perde. `draw`: empate acordado. `abort`: sem resultado |
+
+### `leave_game`
+Sem parâmetros. Libera o assento da sessão (vira `empty`). Útil antes de outra LLM entrar.
+
+## Prompt: `chess_teacher`
+Argumentos: `student_level` (`"beginner" | "intermediate" | "advanced"`, default beginner),
+`language` (default `"pt-BR"`). Retorna uma mensagem de usuário que instrui a LLM a:
+1. Chamar `new_game`/`join_game`, depois alternar `make_move` ↔ `wait_for_turn`.
+2. **Ditar cada lance** em texto no chat ("Jogo 5. Bb5, cravando o cavalo") — o aluno lê no
+   chat e vê no tabuleiro.
+3. Comentar como professor: explicar a ideia dos seus lances, reagir aos lances do aluno
+   (elogiar bons, explicar suavemente os ruins sem dar spoiler da refutação toda), sugerir
+   planos, usar `highlight` para mostrar ameaças, fazer perguntas socráticas no `comment`.
+4. Nunca confiar na memória: **sempre** ler `legalMoves`/`pieces` da última resposta antes
+   de escolher o lance. Se `make_move` falhar, escolher entre os lances legais devolvidos.
+5. Jogar no nível do aluno (não esmagar iniciante; jogar sólido e instrutivo).
+6. Responder mensagens do humano (`messages[]`) com `comment` e no chat.
+
+## Recursos
+- `xadrez://game/state` — texto formatado do estado (o mesmo de `get_state`). `mimeType: text/plain`.
+- `xadrez://game/pgn` — PGN da partida atual. `mimeType: application/x-chess-pgn`.
+- `xadrez://game/state.json` — `GameState` em JSON.
+
+## Formato do texto de estado (para LLM)
+
+Gerado por `formatStateForLLM(state, perspective)` em `server/src/game/format.ts`.
+`perspective` = cor da sessão chamadora (ou `null` para espectador). Exemplo:
+
+```
+# Partida 3f2a — lance 12, vez das BRANCAS (Felipe, humano)
+Você joga de PRETAS como "Claude". Status: em andamento. Sem xeque.
+Último lance: 11...Nf6 (você). Material: igual (0).
+➡ Próximo passo: não é sua vez. Chame wait_for_turn.
+
+FEN: r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 4 12
+
+Brancas (Felipe): K g1 · Q d1 · R a1 f1 · B c1 c4 · N c3 f3 · P a2 b2 c2 d3 e4 f2 g2 h2
+Pretas (você):    K g8 · Q d8 · R a8 f8 · B c5 c8 · N c6 f6 · P a7 b7 c7 d6 e5 f7 g7 h7
+Capturadas: brancas tomaram — · pretas tomaram —
+
+   +------------------------+
+ 8 | r  .  b  q  .  r  k  . |
+ 7 | p  p  p  .  .  p  p  p |
+ 6 | .  .  n  p  .  n  .  . |
+ 5 | .  .  b  .  p  .  .  . |
+ 4 | .  .  B  .  P  .  .  . |
+ 3 | .  .  N  P  .  N  .  . |
+ 2 | P  P  P  .  .  P  P  P |
+ 1 | R  .  B  Q  .  R  K  . |
+   +------------------------+
+     a  b  c  d  e  f  g  h
+
+Histórico: 1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. d3 Nf6 5. Nc3 d6 6. O-O O-O ... 11. h3 Nf6
+
+Lances legais (é a vez das brancas; 31): a3 a4 b3 b4 Bd2 Be3 Bg5 Bxf7+ ... (capturas: Bxf7+, Nxe5; xeques: Bxf7+)
+
+Mensagens do aluno (1 nova):
+ - [lance 12] "por que você jogou o cavalo pra f6 e não pra h5?"
+```
+
+Regras do formatador:
+- Sempre incluir: cabeçalho, próximo passo, FEN, listas de peças, ASCII, histórico completo
+  em SAN numerado, lances legais **só quando for a vez de `perspective`** (senão, contagem
+  apenas), capturas/material, mensagens pendentes, resultado final se terminou.
+- Comentários anteriores **não** entram no estado (a LLM já os tem no seu contexto); apenas
+  os últimos 3 comentários do oponente (modo LLM vs LLM) para dar contexto de conversa.
+- Manter abaixo de ~1.500 tokens mesmo em partidas longas (histórico em SAN é compacto).
