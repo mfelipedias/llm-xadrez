@@ -45,6 +45,7 @@ function seatKindLabel(state: GameState, color: Color): string {
   const seat = state.seats[color];
   if (seat.kind === "human") return "humano";
   if (seat.kind === "mcp") return "LLM";
+  if (seat.kind === "bot") return "LLM (bot)";
   return "assento vazio";
 }
 
@@ -191,7 +192,8 @@ function messagesText(state: GameState, perspective: Color | null, override?: Hu
 function opponentCommentsText(state: GameState, perspective: Color | null): string[] {
   if (!perspective) return [];
   const opp = otherColor(perspective);
-  if (state.seats[opp].kind !== "mcp") return [];
+  const oppKind = state.seats[opp].kind;
+  if (oppKind !== "mcp" && oppKind !== "bot") return [];
   // Comentários avulsos (`comment`) e comentários anexados a lances (`make_move.comment`) do oponente.
   const entries: { ply: number; seq: number; text: string }[] = [];
   state.commentary.forEach((c, i) => {

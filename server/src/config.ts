@@ -50,6 +50,19 @@ export interface Config {
   baseUrl: string;
   /** URL do endpoint MCP, ex.: http://localhost:3939/mcp */
   mcpUrl: string;
+  /** Arquivo de provedores/perfis de bot (docs/09, seção 4.1). */
+  providersFile: string;
+  /** Recriar bots do `current-game.json` ao reiniciar o servidor. */
+  botAutoResume: boolean;
+  /** Id do perfil de bot sugerido na UI (vazio = o `defaults.profileId` do providers.json). */
+  botDefaultProfile: string;
+  /** Injeta o provedor determinístico "fake" no registry (smoke sem rede: `scripts/bot-smoke.ts`). */
+  botFakeProvider: boolean;
+}
+
+function parseBool(raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  return !/^(0|false|no|off)$/i.test(raw.trim());
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -63,6 +76,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // no host, túnel). Só afeta as URLs exibidas/anunciadas, não o bind.
   const publicUrl = (env.PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
   const baseUrl = publicUrl || `http://${displayHost}:${port}`;
+  const providersRaw = (env.PROVIDERS_FILE ?? "./providers.json").trim() || "./providers.json";
+  const providersFile = path.isAbsolute(providersRaw) ? providersRaw : path.resolve(ROOT_DIR, providersRaw);
   return {
     port,
     host,
@@ -74,6 +89,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     isProduction: env.NODE_ENV === "production",
     baseUrl,
     mcpUrl: `${baseUrl}/mcp`,
+    providersFile,
+    botAutoResume: parseBool(env.BOT_AUTORESUME, true),
+    botDefaultProfile: (env.BOT_DEFAULT_PROFILE ?? "").trim(),
+    botFakeProvider: parseBool(env.BOT_FAKE_PROVIDER, false),
   };
 }
 

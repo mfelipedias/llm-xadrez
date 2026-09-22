@@ -14,16 +14,44 @@ import { attachPersistence } from "./game/persist.js";
 import { createApiRouter } from "./http/api.js";
 import { attachWebSocket } from "./http/ws.js";
 import { createMcpRouter } from "./mcp/transport.js";
+import { ProviderRegistry } from "./bots/providers/registry.js";
+import { createFakeProvider } from "./bots/providers/fake.js";
+import { BotManager } from "./bots/manager.js";
 
 const log = createLogger("http");
 
-const store = new GameStore({ defaultHumanName: config.humanName });
+const store = new GameStore({ defaultHumanName: config.humanName, restoreBots: config.botAutoResume });
 const persistence = attachPersistence(store, config.dataDir);
-const serverInfo = (): ServerInfo => store.serverInfo(config.version, config.mcpUrl);
+const registry = new ProviderRegistry({ file: config.providersFile });
+if (config.botFakeProvider) {
+  // BOT_FAKE_PROVIDER=1: provedor determinístico em memória, para `npm run smoke:bot` sem rede.
+  registry.inject(createFakeProvider({ id: "fake" }), { name: "Fake (determinístico)", toolMode: "native", local: true });
+  log.info('BOT_FAKE_PROVIDER: provedor "fake" injetado (modelo "fake-1")');
+}
+const bots = new BotManager({ store, registry, lang: config.lang });
+const serverInfo = (): ServerInfo => ({
+  ...store.serverInfo(config.version, config.mcpUrl),
+  providers: registry.publicList(),
+  profiles: registry.profiles(),
+  bots: store.botSeats(),
+});
 
 const app = createMcpExpressApp({ host: config.host });
 
-app.use("/api", createApiRouter({ store, persistence, serverInfo, defaultHumanName: config.humanName }));
+app.use(
+  "/api",
+  createApiRouter({
+    store,
+    persistence,
+    serverInfo,
+    defaultHumanName: config.humanName,
+    registry,
+    bots,
+    ...(config.mcpToken ? { adminToken: config.mcpToken } : {}),
+  }),
+);
+
+if (config.botAutoResume) bots.autoResume();
 
 const mcp = createMcpRouter(store, {
   version: config.version,
@@ -107,6 +135,7 @@ async function shutdown(signal: string): Promise<void> {
   const force = setTimeout(() => process.exit(0), 3000);
   force.unref();
   try {
+    bots.stopAll();
     store.dispose();
     await persistence.flush();
     await mcp.closeAll();

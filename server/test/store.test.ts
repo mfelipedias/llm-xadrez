@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { GameError, GameStore } from "../src/game/store.js";
-import type { GameState } from "../../shared/types.js";
+import { GameError, GameStore, botSessionId, emptyBotUsage, isAgentSeat } from "../src/game/store.js";
+import type { BotSeatInfo, Color, GameState } from "../../shared/types.js";
 
 function humanVsLlm(sessionId = "s1"): GameStore {
   const store = new GameStore({ defaultHumanName: "Felipe" });
@@ -9,6 +9,30 @@ function humanVsLlm(sessionId = "s1"): GameStore {
   });
   store.sessionOpened(sessionId);
   return store;
+}
+
+function botInfo(over: Partial<BotSeatInfo> = {}): BotSeatInfo {
+  return {
+    providerId: "openrouter",
+    model: "anthropic/claude-sonnet-4.6",
+    toolMode: "native",
+    status: "waiting",
+    usage: emptyBotUsage(),
+    ...over,
+  };
+}
+
+/** Humano de brancas contra um bot de pretas (sessão sintética, como o BotManager fará). */
+function humanVsBot(sessionId = botSessionId("black", "abc")): { store: GameStore; sessionId: string } {
+  const store = new GameStore({ defaultHumanName: "Felipe" });
+  store.sessionOpened(sessionId);
+  store.newGame({
+    seats: {
+      white: { kind: "human", name: "Felipe" },
+      black: { kind: "bot", name: "Sonnet (bot)", sessionId, bot: botInfo() },
+    },
+  });
+  return { store, sessionId };
 }
 
 describe("GameStore — partida e lances", () => {
@@ -344,5 +368,135 @@ describe("GameStore — persistência (loadState)", () => {
     expect(s.seats.black.kind).toBe("empty");
     expect(s.status).toBe("waiting");
     expect(s.pgn).toContain("{centro}");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Assentos `bot` (docs/09, fase A)                                    */
+/* ------------------------------------------------------------------ */
+
+describe("GameStore — assento bot", () => {
+  it("isAgentSeat cobre mcp e bot, mas não humano/vazio", () => {
+    expect(isAgentSeat({ kind: "mcp" })).toBe(true);
+    expect(isAgentSeat({ kind: "bot" })).toBe(true);
+    expect(isAgentSeat({ kind: "human" })).toBe(false);
+    expect(isAgentSeat({ kind: "empty" })).toBe(false);
+  });
+
+  it("senta o bot com bot info e joga: by = 'bot' no histórico", () => {
+    const { store } = humanVsBot();
+    const s = store.getState();
+    expect(s.status).toBe("active");
+    expect(s.seats.black).toMatchObject({ kind: "bot", name: "Sonnet (bot)" });
+    expect(s.seats.black.bot).toMatchObject({ providerId: "openrouter", model: "anthropic/claude-sonnet-4.6", status: "waiting" });
+    store.applyMove("white", "e4");
+    const rec = store.applyMove("black", "e5", { comment: "Disputo o centro." });
+    expect(rec.by).toBe("bot");
+    expect(store.getState().pgn).toContain('[Black "Sonnet (bot)"]');
+  });
+
+  it("seatForSession encontra o bot pela sessão sintética", () => {
+    const { store, sessionId } = humanVsBot();
+    expect(sessionId.startsWith("bot:black:")).toBe(true);
+    expect(store.seatForSession(sessionId)).toBe("black");
+    expect(store.seatForSession("bot:black:outro")).toBeNull();
+  });
+
+  it("serverInfo não lista a sessão sintética do bot", () => {
+    const { store } = humanVsBot();
+    store.sessionOpened("mcp-1");
+    const info = store.serverInfo("0.1.0", "http://localhost:3939/mcp");
+    expect(info.mcpSessions.map((s) => s.sessionId)).toEqual(["mcp-1"]);
+  });
+
+  it("recebe opponent_moved quando o humano joga", async () => {
+    const { store, sessionId } = humanVsBot();
+    const p = store.waitForTurn("black", 2000, { sessionId });
+    store.applyMove("white", "e4");
+    const ev = await p;
+    expect(ev.event).toBe("opponent_moved");
+    expect(ev.opponentMove?.san).toBe("e4");
+    expect(ev.isYourTurn).toBe(true);
+  });
+
+  it("recebe message do humano (e a marca entregue)", async () => {
+    const { store, sessionId } = humanVsBot();
+    const p = store.waitForTurn("black", 2000, { sessionId });
+    store.addHumanMessage("por que e4?", "black");
+    const ev = await p;
+    expect(ev.event).toBe("message");
+    expect(ev.messages.map((m) => m.text)).toEqual(["por que e4?"]);
+    expect(store.pendingMessages("black")).toHaveLength(0);
+  });
+
+  it("recebe takeback do humano", async () => {
+    const { store, sessionId } = humanVsBot();
+    store.applyMove("white", "e4");
+    store.applyMove("black", "e5");
+    store.takeback(2, "human");
+    const ev = await store.waitForTurn("black", 50, { sessionId });
+    expect(ev.event).toBe("takeback");
+  });
+
+  it("recebe game_over e new_game; oferta de empate vira mensagem", async () => {
+    const { store, sessionId } = humanVsBot();
+    store.offerDraw("white");
+    expect(store.pendingMessages("black")).toHaveLength(1);
+    store.markDelivered("black");
+    store.endGame("resignation", "white");
+    expect((await store.waitForTurn("black", 50, { sessionId })).event).toBe("game_over");
+
+    store.newGame({
+      seats: {
+        white: { kind: "human", name: "Felipe" },
+        black: { kind: "bot", name: "Sonnet (bot)", sessionId, bot: botInfo() },
+      },
+    });
+    expect((await store.waitForTurn("black", 50, { sessionId })).event).toBe("new_game");
+  });
+
+  it("updateBot emite 'bot' sem emitir 'change' e acumula uso", () => {
+    const { store } = humanVsBot();
+    const changes: number[] = [];
+    const bots: { color: Color; bot: BotSeatInfo }[] = [];
+    store.on("change", () => changes.push(1));
+    store.on("bot", (color: Color, bot: BotSeatInfo) => bots.push({ color, bot }));
+
+    store.updateBot("black", { status: "thinking", thinkingSince: "2026-09-22T10:00:00.000Z" });
+    store.updateBot("black", { status: "waiting", usage: { calls: 1, inputTokens: 900, outputTokens: 60, illegalMoves: 0 } });
+
+    expect(changes).toHaveLength(0);
+    expect(bots.map((b) => b.bot.status)).toEqual(["thinking", "waiting"]);
+    const seat = store.getState().seats.black;
+    expect(seat.bot).toMatchObject({ status: "waiting", usage: { calls: 1, inputTokens: 900, outputTokens: 60 } });
+    // Modelo/provedor preservados pelo patch parcial.
+    expect(seat.bot?.model).toBe("anthropic/claude-sonnet-4.6");
+    expect(store.updateBot("white", { status: "error" })).toBeNull();
+  });
+
+  it("join_game só toma o assento do bot com force", () => {
+    const { store } = humanVsBot();
+    store.sessionOpened("mcp-1");
+    expect(() => store.joinGame({ sessionId: "mcp-1", color: "black", name: "Claude" })).toThrowError(/bot do servidor/);
+    expect(store.joinGame({ sessionId: "mcp-1", color: "black", name: "Claude", force: true })).toBe("black");
+    expect(store.getState().seats.black.kind).toBe("mcp");
+  });
+
+  it("loadState mantém o assento bot (BOT_AUTORESUME) e o esvazia quando desligado", () => {
+    const { store } = humanVsBot();
+    store.applyMove("white", "e4");
+    store.updateBot("black", { status: "thinking", usage: { calls: 3, inputTokens: 1000, outputTokens: 100, illegalMoves: 1 } });
+    const saved: GameState = JSON.parse(JSON.stringify(store.getState())) as GameState;
+
+    const resumed = new GameStore();
+    resumed.loadState(saved);
+    const seat = resumed.getState().seats.black;
+    expect(seat.kind).toBe("bot");
+    expect(seat.sessionId).toBeUndefined();
+    expect(seat.bot).toMatchObject({ providerId: "openrouter", status: "stopped", usage: { calls: 3, illegalMoves: 1 } });
+
+    const dropped = new GameStore({ restoreBots: false });
+    dropped.loadState(saved);
+    expect(dropped.getState().seats.black).toEqual({ kind: "empty", name: "Sonnet (bot)" });
   });
 });

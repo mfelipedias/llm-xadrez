@@ -36,12 +36,33 @@ export const colorSchema = z.enum(["white", "black"]);
 export const pieceTypeSchema = z.enum(["p", "n", "b", "r", "q", "k"]);
 export const commentCategorySchema = z.enum(["lesson", "plan", "reaction", "question", "praise", "warning", "info"]);
 
+const seatKindSchema = z.enum(["human", "mcp", "bot", "empty"]);
+
+const botSeatInfoSchema = z.object({
+  providerId: z.string(),
+  model: z.string(),
+  profileId: z.string().optional(),
+  toolMode: z.enum(["native", "text"]),
+  status: z.enum(["idle", "waiting", "thinking", "acting", "error", "budget_exceeded", "stopped"]),
+  statusText: z.string().optional(),
+  thinkingSince: z.string().optional(),
+  usage: z.object({
+    calls: z.number(),
+    inputTokens: z.number(),
+    outputTokens: z.number(),
+    cachedInputTokens: z.number().optional(),
+    estimatedCostUsd: z.number().optional(),
+    illegalMoves: z.number(),
+  }),
+});
+
 const seatSchema = z.object({
-  kind: z.enum(["human", "mcp", "empty"]),
+  kind: seatKindSchema,
   name: z.string(),
   sessionId: z.string().optional(),
   connectedAt: z.string().optional(),
   lastSeenAt: z.string().optional(),
+  bot: botSeatInfoSchema.optional(),
 });
 
 const legalMoveSchema = z.object({
@@ -71,7 +92,7 @@ const moveRecordSchema = z.object({
   isCheck: z.boolean(),
   isCheckmate: z.boolean(),
   fenAfter: z.string(),
-  by: z.enum(["human", "mcp", "empty"]),
+  by: seatKindSchema,
   comment: z.string().optional(),
   timestamp: z.string(),
 });
@@ -336,7 +357,8 @@ export function toolJoinGame(ctx: ToolContext, args: JoinGameArgs): CallToolResu
   }
   const state = ctx.store.getState();
   const opp = state.seats[otherColor(color)];
-  const oppText = opp.kind === "empty" ? "o outro assento ainda está vazio" : `contra ${opp.name} (${opp.kind === "human" ? "humano" : "LLM"})`;
+  const oppKindPt = opp.kind === "human" ? "humano" : opp.kind === "bot" ? "LLM (bot do servidor)" : "LLM";
+  const oppText = opp.kind === "empty" ? "o outro assento ainda está vazio" : `contra ${opp.name} (${oppKindPt})`;
   return withState(ctx, color, `Você entrou na partida de ${COLOR_UPPER[color]} como "${args.my_name}"; ${oppText}.`);
 }
 

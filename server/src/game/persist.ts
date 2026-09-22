@@ -97,6 +97,9 @@ export function attachPersistence(store: GameStore, dataDir: string, opts: { deb
 
   store.on("change", onChange);
   store.on("archive", onArchive);
+  // "bot" não emite "change" (docs/09, seção 5.2), mas o status/uso do bot precisa sobreviver
+  // a um reinício do servidor quando BOT_AUTORESUME está ligado.
+  store.on("bot", onChange);
 
   return {
     async flush() {
@@ -144,6 +147,7 @@ export function attachPersistence(store: GameStore, dataDir: string, opts: { deb
     detach() {
       store.off("change", onChange);
       store.off("archive", onArchive);
+      store.off("bot", onChange);
       if (timer) {
         clearTimeout(timer);
         timer = null;

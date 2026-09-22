@@ -60,3 +60,32 @@ Histórico: (nenhum lance ainda)
 
 Lances legais: 20 para as brancas (não é sua vez; não listados)."
 `;
+
+exports[`formatStateForLLM > rotula o assento bot como 'LLM (bot)' e mostra os comentários dele 1`] = `
+"# Partida 3f2a — lance 2, vez das BRANCAS (Felipe, humano)
+Você joga de PRETAS como "Sonnet (bot)". Status: em andamento. Sem xeque.
+Último lance: 1...e5 (você). Material: igual (0).
+➡ Próximo passo: Não é sua vez. Chame wait_for_turn.
+
+FEN: rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2
+
+Brancas (Felipe): K e1 · Q d1 · R a1 h1 · B c1 f1 · N b1 g1 · P a2 b2 c2 d2 e4 f2 g2 h2
+Pretas (você):    K e8 · Q d8 · R a8 h8 · B c8 f8 · N b8 g8 · P a7 b7 c7 d7 e5 f7 g7 h7
+Capturadas: brancas tomaram — · pretas tomaram —
+
+   +------------------------+
+ 8 | r  n  b  q  k  b  n  r |
+ 7 | p  p  p  p  .  p  p  p |
+ 6 | .  .  .  .  .  .  .  . |
+ 5 | .  .  .  .  p  .  .  . |
+ 4 | .  .  .  .  P  .  .  . |
+ 3 | .  .  .  .  .  .  .  . |
+ 2 | P  P  P  P  .  P  P  P |
+ 1 | R  N  B  Q  K  B  N  R |
+   +------------------------+
+     a  b  c  d  e  f  g  h
+
+Histórico: 1. e4 e5
+
+Lances legais: 29 para as brancas (não é sua vez; não listados)."
+`;

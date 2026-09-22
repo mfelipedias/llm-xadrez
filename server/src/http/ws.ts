@@ -3,11 +3,12 @@
  *  - ao conectar: { type: "hello", state, server }
  *  - a cada "change" do store: { type: "state", state }
  *  - a cada "server" do store (sessões MCP, lastSeenAt): { type: "server", server } (throttle 500 ms)
+ *  - a cada "bot" do store (status/uso de um assento bot): { type: "bot", color, bot }
  *  - ping/pong a cada 30 s
  */
 import type { Server as HttpServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import type { GameState, ServerInfo, WsServerMessage } from "../../../shared/types.js";
+import type { BotSeatInfo, Color, GameState, ServerInfo, WsServerMessage } from "../../../shared/types.js";
 import type { GameStore } from "../game/store.js";
 import { createLogger } from "../log.js";
 
@@ -58,8 +59,13 @@ export function attachWebSocket(
     }, serverThrottleMs);
   };
 
+  const onBot = (color: Color, bot: BotSeatInfo): void => {
+    broadcast({ type: "bot", color, bot });
+  };
+
   store.on("change", onChange);
   store.on("server", onServer);
+  store.on("bot", onBot);
 
   wss.on("connection", (socket: AliveSocket, req) => {
     socket.isAlive = true;
@@ -90,6 +96,7 @@ export function attachWebSocket(
       if (serverTimer) clearTimeout(serverTimer);
       store.off("change", onChange);
       store.off("server", onServer);
+      store.off("bot", onBot);
       for (const client of wss.clients) client.terminate();
       wss.close();
     },

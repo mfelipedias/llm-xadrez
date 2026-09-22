@@ -5,26 +5,59 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import type {
   ApiError,
+  BotSeatInfo,
   Color,
+  GameState,
   HumanSeating,
   MessageRequest,
   MoveRequest,
   NewGameRequest,
   ResignRequest,
+  SeatRequest,
   ServerInfo,
   TakebackRequest,
 } from "../../../shared/types.js";
-import { GameError, type GameStore, type SeatInit } from "../game/store.js";
+import { GameError, emptyBotUsage, type GameStore, type SeatInit } from "../game/store.js";
 import type { Persistence } from "../game/persist.js";
+import { PRESET_IDS, type ProviderRegistry } from "../bots/providers/registry.js";
+import { ProviderError } from "../bots/providers/types.js";
 import { createLogger } from "../log.js";
 
 const log = createLogger("api");
+
+/** Bot seat request (variante `kind: "bot"` de SeatRequest). */
+export type BotSeatRequest = Extract<SeatRequest, { kind: "bot" }>;
+
+/**
+ * Ponte com o BotManager (fase C). Sem ela, um assento `bot` pedido em `POST /api/game` é
+ * criado no store com status "stopped" (ninguém joga por ele) — o contrato REST já vale.
+ */
+export interface BotSeatingHook {
+  /** Cria/reaproveita o BotPlayer e devolve o SeatInit a usar na nova partida. */
+  prepare(color: Color, req: BotSeatRequest): SeatInit;
+  /** Chamado depois que a partida foi criada, com o estado final. */
+  afterNewGame?(state: GameState): void;
+  /** `POST /api/bots/:color/sit`. */
+  sit?(color: Color, req: BotSeatRequest): GameState;
+  /** `POST /api/bots/:color/stop`. */
+  stop?(color: Color): BotSeatInfo | null;
+  /** `POST /api/bots/:color/resume`. */
+  resume?(color: Color, req?: Partial<BotSeatRequest>): BotSeatInfo;
+  /** `POST /api/bots/:color/leave`. */
+  leave?(color: Color): GameState;
+}
 
 export interface ApiDeps {
   store: GameStore;
   persistence: Pick<Persistence, "listGames" | "readGamePgn">;
   serverInfo: () => ServerInfo;
   defaultHumanName: string;
+  /** Camada de provedores (docs/09, fase B). Ausente = rotas /api/providers* respondem 503. */
+  registry?: ProviderRegistry;
+  /** BotManager (docs/09, fase C). */
+  bots?: BotSeatingHook;
+  /** MCP_TOKEN: quando definido, as rotas de escrita de provedores exigem o Bearer. */
+  adminToken?: string;
 }
 
 const COLORS: Color[] = ["white", "black"];
@@ -57,6 +90,30 @@ function isColor(v: unknown): v is Color {
   return v === "white" || v === "black";
 }
 
+/** Pedido de assento inválido: vira 4xx com mensagem pronta. */
+class SeatRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "SeatRequestError";
+  }
+}
+
+/** Status HTTP carregado pelo erro (SeatRequestError, BotSeatError) ou o fallback. */
+function httpStatusOf(err: unknown, fallback = 400): number {
+  const raw = (err as { status?: unknown } | null)?.status;
+  return typeof raw === "number" && raw >= 400 && raw < 600 ? raw : fallback;
+}
+
+/** Só o próprio computador pode reconfigurar provedores (docs/09, seção 6). */
+function isLoopback(ip: string | undefined): boolean {
+  if (!ip) return false;
+  const v = ip.replace(/^::ffff:/, "");
+  return v === "::1" || v === "127.0.0.1" || v.startsWith("127.");
+}
+
 /** Cor do assento humano que deve agir (vez, ou o único humano). */
 function humanSeatColor(store: GameStore, requested?: unknown): Color | null {
   const state = store.getState();
@@ -71,6 +128,64 @@ export function createApiRouter(deps: ApiDeps): Router {
   const { store } = deps;
   const router = Router();
 
+  /** Traduz um `SeatRequest` da UI num `SeatInit` do store. Lança `SeatRequestError`. */
+  function seatInitFromRequest(color: Color, req: SeatRequest | undefined, humanName?: string): SeatInit {
+    const kind = req?.kind ?? "empty";
+    const name = typeof (req as { name?: unknown } | undefined)?.name === "string" ? (req as { name: string }).name : undefined;
+    if (kind === "human") {
+      return { kind: "human", name: name?.trim() || humanName?.trim() || deps.defaultHumanName };
+    }
+    if (kind === "mcp") {
+      // Sessão MCP viva que já estava nesta cor continua sentada; senão o assento fica vazio
+      // esperando `join_game` (é o que "aguardar MCP" significa na UI).
+      const previous = store.getState().seats[color];
+      if (previous.kind === "mcp" && store.isSessionOpen(previous.sessionId)) {
+        const init: SeatInit = { kind: "mcp", name: name?.trim() || previous.name };
+        if (previous.sessionId) init.sessionId = previous.sessionId;
+        return init;
+      }
+      return { kind: "empty", name: name?.trim() ?? "" };
+    }
+    if (kind === "bot") {
+      const botReq = req as BotSeatRequest;
+      if (deps.bots) return deps.bots.prepare(color, botReq);
+      return fallbackBotSeat(botReq, name);
+    }
+    return { kind: "empty", name: name?.trim() ?? "" };
+  }
+
+  /**
+   * Sem BotManager (fases A/B): o assento existe e carrega provedor/modelo, mas o bot não joga.
+   * A fase C substitui isto pelo `BotSeatingHook`.
+   */
+  function fallbackBotSeat(req: BotSeatRequest, name?: string): SeatInit {
+    const registry = deps.registry;
+    const profile = req.profileId && registry ? registry.profile(req.profileId) : undefined;
+    if (req.profileId && registry && !profile) {
+      throw new SeatRequestError(400, `Perfil de bot "${req.profileId}" não existe.`);
+    }
+    const providerId = req.providerId ?? profile?.providerId ?? "";
+    const model = req.model ?? profile?.model ?? "";
+    if (!providerId || !model) {
+      throw new SeatRequestError(400, "Assento de bot exige `profileId` ou `providerId` + `model`.");
+    }
+    if (registry) {
+      if (!registry.has(providerId)) throw new SeatRequestError(400, `Provedor "${providerId}" não está configurado.`);
+      const missing = registry.missingKeyReason(providerId);
+      if (missing) throw new SeatRequestError(400, missing);
+    }
+    const bot: BotSeatInfo = {
+      providerId,
+      model,
+      toolMode: profile?.toolMode ?? "native",
+      status: "stopped",
+      statusText: "sem o gerenciador de bots no servidor",
+      usage: emptyBotUsage(),
+    };
+    if (req.profileId) bot.profileId = req.profileId;
+    return { kind: "bot", name: name?.trim() || profile?.name || `${providerId}/${model}`, bot };
+  }
+
   router.get("/health", (_req, res) => {
     const info = deps.serverInfo();
     res.json({ ok: true, version: info.version, mcpUrl: info.mcpUrl, mcpSessions: info.mcpSessions });
@@ -82,6 +197,29 @@ export function createApiRouter(deps: ApiDeps): Router {
 
   router.post("/game", (req, res) => {
     const body = (req.body ?? {}) as Partial<NewGameRequest>;
+
+    // Novo contrato (docs/09, seção 5.1): `seats` tem precedência sobre `humanSeats`.
+    if (body.seats && typeof body.seats === "object") {
+      let seats: { white: SeatInit; black: SeatInit };
+      try {
+        seats = {
+          white: seatInitFromRequest("white", body.seats.white, body.humanName),
+          black: seatInitFromRequest("black", body.seats.black, body.humanName),
+        };
+      } catch (err) {
+        sendError(res, httpStatusOf(err), (err as Error).message);
+        return;
+      }
+      const startFenExplicit =
+        typeof body.startFen === "string" && body.startFen.trim() ? body.startFen.trim() : undefined;
+      const kinds = `${seats.white.kind} vs ${seats.black.kind}`;
+      log.info(`nova partida via REST (seats: ${kinds}${startFenExplicit ? ", FEN customizado" : ""})`);
+      const state = store.newGame({ seats, startFen: startFenExplicit });
+      deps.bots?.afterNewGame?.(state);
+      res.json(store.getState());
+      return;
+    }
+
     const humanSeats: HumanSeating = SEATINGS.includes(body.humanSeats as HumanSeating) ? (body.humanSeats as HumanSeating) : "white";
     const humanName = typeof body.humanName === "string" && body.humanName.trim() ? body.humanName.trim() : deps.defaultHumanName;
     const startFen = typeof body.startFen === "string" && body.startFen.trim() ? body.startFen.trim() : undefined;
@@ -107,7 +245,10 @@ export function createApiRouter(deps: ApiDeps): Router {
       if (keep) seats[free] = { kind: "mcp", name: keep.name, sessionId: keep.sessionId };
     }
     log.info(`nova partida via REST (humanSeats=${humanSeats}${startFen ? ", FEN customizado" : ""})`);
-    res.json(store.newGame({ seats: { white: seats.white, black: seats.black }, startFen }));
+    const state = store.newGame({ seats: { white: seats.white, black: seats.black }, startFen });
+    // Nenhum assento é bot aqui, mas o manager precisa saber para parar bots da partida anterior.
+    deps.bots?.afterNewGame?.(state);
+    res.json(store.getState());
   });
 
   router.post("/move", (req, res) => {
@@ -195,6 +336,230 @@ export function createApiRouter(deps: ApiDeps): Router {
     res.json(store.setHighlight("system", null));
   });
 
+  /* ------------------------- provedores de LLM ------------------------ */
+
+  /** Registry ou 503 (camada de provedores desligada). */
+  function registryOr503(res: Response): ProviderRegistry | null {
+    if (deps.registry) return deps.registry;
+    sendError(res, 503, "Camada de provedores indisponível neste servidor.");
+    return null;
+  }
+
+  /** Rotas que gravam `providers.json`: só localhost e, se houver MCP_TOKEN, com o Bearer. */
+  function canAdmin(req: Request, res: Response): boolean {
+    if (deps.adminToken) {
+      const header = req.header("authorization") ?? "";
+      const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+      if (token !== deps.adminToken) {
+        sendError(res, 403, "Configuração de provedores exige o MCP_TOKEN no header Authorization.");
+        return false;
+      }
+      return true;
+    }
+    if (!isLoopback(req.ip)) {
+      sendError(res, 403, "Configuração de provedores só é permitida a partir do próprio computador (localhost).");
+      return false;
+    }
+    return true;
+  }
+
+  function providerErrorStatus(err: unknown): number {
+    if (err instanceof ProviderError) {
+      if (err.status === 401 || err.status === 403) return 502;
+      return 502;
+    }
+    return 500;
+  }
+
+  function providerErrorText(err: unknown): string {
+    if (err instanceof ProviderError) return err.shortText;
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  router.get("/providers", (_req, res) => {
+    const registry = registryOr503(res);
+    if (!registry) return;
+    res.json({ providers: registry.publicList(), profiles: registry.profiles(), presets: PRESET_IDS });
+  });
+
+  router.put("/providers/:id", (req, res) => {
+    const registry = registryOr503(res);
+    if (!registry) return;
+    if (!canAdmin(req, res)) return;
+    const id = String(req.params.id ?? "").trim();
+    if (!id) {
+      sendError(res, 400, "Informe o id do provedor.");
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    // A UI nunca envia a chave: ela vive só no .env (docs/09, seção 6).
+    for (const forbidden of ["apiKey", "api_key", "key", "token"]) {
+      if (forbidden in body) {
+        sendError(res, 400, "Chaves de API não são aceitas pela API: defina a variável de ambiente e use `apiKeyEnv`.");
+        return;
+      }
+    }
+    delete body.id;
+    const saved = registry.upsert(id, body);
+    res.json(registry.toPublic(saved));
+  });
+
+  router.post("/providers/preset", (req, res) => {
+    const registry = registryOr503(res);
+    if (!registry) return;
+    if (!canAdmin(req, res)) return;
+    const body = (req.body ?? {}) as { preset?: unknown; id?: unknown };
+    const preset = typeof body.preset === "string" ? body.preset : "";
+    if (!preset || !PRESET_IDS.includes(preset)) {
+      sendError(res, 400, `Preset desconhecido. Disponíveis: ${PRESET_IDS.join(", ")}.`);
+      return;
+    }
+    const id = typeof body.id === "string" && body.id.trim() ? body.id.trim() : preset;
+    try {
+      const cfg = registry.addPreset(preset, id);
+      res.json(registry.toPublic(cfg));
+    } catch (err) {
+      sendError(res, 409, providerErrorText(err));
+    }
+  });
+
+  router.delete("/providers/:id", (req, res) => {
+    const registry = registryOr503(res);
+    if (!registry) return;
+    if (!canAdmin(req, res)) return;
+    const id = String(req.params.id ?? "");
+    const inUse = COLORS.some((c) => {
+      const seat = store.getState().seats[c];
+      return seat.kind === "bot" && seat.bot?.providerId === id;
+    });
+    if (inUse) {
+      sendError(res, 409, `O provedor "${id}" está em uso por um bot na partida atual.`);
+      return;
+    }
+    if (!registry.remove(id)) {
+      sendError(res, 404, `Provedor "${id}" não encontrado.`);
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  router.post("/providers/:id/test", (req, res, next) => {
+    const registry = registryOr503(res);
+    if (!registry) return;
+    const id = String(req.params.id ?? "");
+    if (!registry.has(id)) {
+      sendError(res, 404, `Provedor "${id}" não encontrado.`);
+      return;
+    }
+    registry
+      .test(id)
+      .then((result) => {
+        if (result.ok) res.json(result);
+        else res.status(502).json({ ok: false, error: result.error } satisfies { ok: false; error: string });
+      })
+      .catch(next);
+  });
+
+  router.get("/providers/:id/models", (req, res, next) => {
+    const registry = registryOr503(res);
+    if (!registry) return;
+    const id = String(req.params.id ?? "");
+    if (!registry.has(id)) {
+      sendError(res, 404, `Provedor "${id}" não encontrado.`);
+      return;
+    }
+    registry
+      .models(id, req.query.refresh === "1")
+      .then((models) => res.json(models))
+      .catch((err: unknown) => {
+        sendError(res, providerErrorStatus(err), providerErrorText(err));
+      })
+      .catch(next);
+  });
+
+  /* ------------------------- bots do servidor ------------------------- */
+
+  /** BotManager ou 503 (servidor sem bots internos). */
+  function botsOr503(res: Response): BotSeatingHook | null {
+    if (deps.bots) return deps.bots;
+    sendError(res, 503, "Bots internos indisponíveis neste servidor.");
+    return null;
+  }
+
+  function colorParam(req: Request, res: Response): Color | null {
+    const raw = String(req.params.color ?? "");
+    if (isColor(raw)) return raw;
+    sendError(res, 400, 'Cor inválida: use "white" ou "black".');
+    return null;
+  }
+
+  /** Corpo de sit/resume: um `SeatRequest` de bot sem o `kind`. */
+  function botRequestBody(req: Request): BotSeatRequest {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const pick = (key: string): string | undefined =>
+      typeof body[key] === "string" && (body[key] as string).trim() ? (body[key] as string).trim() : undefined;
+    const out: BotSeatRequest = { kind: "bot" };
+    const profileId = pick("profileId");
+    const providerId = pick("providerId");
+    const model = pick("model");
+    const name = pick("name");
+    if (profileId) out.profileId = profileId;
+    if (providerId) out.providerId = providerId;
+    if (model) out.model = model;
+    if (name) out.name = name;
+    if (body.role === "teacher" || body.role === "opponent" || body.role === "silent") out.role = body.role;
+    if (body.level === "beginner" || body.level === "intermediate" || body.level === "advanced") out.level = body.level;
+    return out;
+  }
+
+  function botRoute(handler: (bots: BotSeatingHook, color: Color, req: Request) => unknown): (req: Request, res: Response) => void {
+    return (req, res) => {
+      const bots = botsOr503(res);
+      if (!bots) return;
+      const color = colorParam(req, res);
+      if (!color) return;
+      try {
+        handler(bots, color, req);
+      } catch (err) {
+        sendError(res, httpStatusOf(err), (err as Error).message);
+        return;
+      }
+      res.json(store.getState());
+    };
+  }
+
+  router.post(
+    "/bots/:color/sit",
+    botRoute((bots, color, req) => {
+      if (!bots.sit) throw new SeatRequestError(503, "Este servidor não sabe sentar bots.");
+      bots.sit(color, botRequestBody(req));
+    }),
+  );
+
+  router.post(
+    "/bots/:color/stop",
+    botRoute((bots, color) => {
+      if (!bots.stop) throw new SeatRequestError(503, "Este servidor não sabe parar bots.");
+      bots.stop(color);
+    }),
+  );
+
+  router.post(
+    "/bots/:color/resume",
+    botRoute((bots, color, req) => {
+      if (!bots.resume) throw new SeatRequestError(503, "Este servidor não sabe retomar bots.");
+      bots.resume(color, botRequestBody(req));
+    }),
+  );
+
+  router.post(
+    "/bots/:color/leave",
+    botRoute((bots, color) => {
+      if (!bots.leave) throw new SeatRequestError(503, "Este servidor não sabe liberar assentos de bot.");
+      bots.leave(color);
+    }),
+  );
+
   router.get("/pgn", (_req, res) => {
     const state = store.getState();
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -226,6 +591,14 @@ export function createApiRouter(deps: ApiDeps): Router {
   router.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof GameError) {
       sendError(res, statusForError(err), err.message, err.legalMoves);
+      return;
+    }
+    if (err instanceof SeatRequestError) {
+      sendError(res, err.status, err.message);
+      return;
+    }
+    if (err instanceof ProviderError) {
+      sendError(res, 502, err.shortText);
       return;
     }
     const message = err instanceof Error ? err.message : String(err);

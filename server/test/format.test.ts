@@ -47,6 +47,42 @@ describe("formatStateForLLM", () => {
     expect(text).toContain("Pretas (você):");
   });
 
+  it("rotula o assento bot como 'LLM (bot)' e mostra os comentários dele", () => {
+    const store = new GameStore({ defaultHumanName: "Felipe" });
+    store.newGame({
+      seats: {
+        white: { kind: "human", name: "Felipe" },
+        black: {
+          kind: "bot",
+          name: "Sonnet (bot)",
+          sessionId: "bot:black:abc",
+          bot: {
+            providerId: "openrouter",
+            model: "anthropic/claude-sonnet-4.6",
+            toolMode: "native",
+            status: "waiting",
+            usage: { calls: 0, inputTokens: 0, outputTokens: 0, illegalMoves: 0 },
+          },
+        },
+      },
+    });
+    store.applyMove("white", "e4");
+    store.applyMove("black", "e5", { comment: "Disputo o centro." });
+    // Perspectiva do humano-espectador... na prática: do próprio bot e do oponente.
+    const asBot = formatStateForLLM(fixState(store.getState()), "black");
+    expect(asBot).toMatchSnapshot();
+    expect(asBot).toContain('Você joga de PRETAS como "Sonnet (bot)"');
+
+    const asWhite = formatStateForLLM(fixState(store.getState()), "white");
+    expect(asWhite).toContain("vez das BRANCAS (você, humano)");
+    expect(asWhite).toContain("Últimos comentários de Sonnet (bot):");
+    expect(asWhite).toContain("(e5) Disputo o centro.");
+
+    store.applyMove("white", "Nf3");
+    const spectator = formatStateForLLM(fixState(store.getState()), null);
+    expect(spectator).toContain("vez das PRETAS (Sonnet (bot), LLM (bot))");
+  });
+
   it("versão curta omite peças e ASCII; espectador sem lances legais", () => {
     const store = midgameStore();
     const text = formatStateForLLM(fixState(store.getState()), null, { short: true });

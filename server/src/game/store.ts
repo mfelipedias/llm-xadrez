@@ -6,6 +6,7 @@
  * Eventos emitidos (EventEmitter):
  *  - "change"  (state: GameState)               → qualquer mutação do estado da partida
  *  - "server"                                   → sessões MCP abertas/fechadas, lastSeenAt
+ *  - "bot"     (color: Color, bot: BotSeatInfo) → status/uso de um assento bot (sem reenviar o estado)
  *  - "archive" ({ id, pgn, state })             → partida terminada/substituída com ≥ 2 lances
  *
  * Ver docs/03-servidor.md.
@@ -14,6 +15,7 @@ import { EventEmitter } from "node:events";
 import { randomBytes } from "node:crypto";
 import { Chess, DEFAULT_POSITION, validateFen, type Move } from "chess.js";
 import type {
+  BotSeatInfo,
   CapturedPieces,
   Color,
   CommentCategory,
@@ -78,6 +80,22 @@ export interface SeatInit {
   kind: SeatKind;
   name?: string;
   sessionId?: string;
+  /** Só para kind === "bot": provedor/modelo/status iniciais (o BotManager preenche). */
+  bot?: BotSeatInfo;
+}
+
+/**
+ * Assento operado por um agente (sessão MCP externa ou bot interno): recebe eventos de
+ * `wait_for_turn`, mensagens do humano e ocupa o assento com um `sessionId`.
+ * O GameStore trata os dois igual; quem sabe o que é um provedor de LLM é o BotManager.
+ */
+export function isAgentSeat(seat: Pick<Seat, "kind">): boolean {
+  return seat.kind === "mcp" || seat.kind === "bot";
+}
+
+/** Estado inicial de uso de um bot (zera a cada nova partida). */
+export function emptyBotUsage(): BotSeatInfo["usage"] {
+  return { calls: 0, inputTokens: 0, outputTokens: 0, illegalMoves: 0 };
 }
 
 export interface NewGameOptions {
@@ -109,6 +127,11 @@ export interface GameStoreOptions {
   defaultLlmName?: string;
   /** Tempo sem atividade após o qual um assento MCP pode ser retomado por outra sessão. */
   sessionIdleMs?: number;
+  /**
+   * Ao carregar `current-game.json`, manter assentos `bot` (o BotManager os recria) em vez de
+   * esvaziá-los. Default: true (BOT_AUTORESUME). Ver docs/09, seção 3.5.
+   */
+  restoreBots?: boolean;
   /** Relógio injetável (testes). */
   now?: () => number;
 }
@@ -166,6 +189,14 @@ const BOARD_END_REASONS: ReadonlySet<EndReason> = new Set([
 const MAX_COMMENTARY = 500;
 const MAX_MESSAGES = 100;
 
+/** Prefixo das sessões sintéticas criadas pelo BotManager: "bot:<cor>:<uuid>". */
+export const BOT_SESSION_PREFIX = "bot:";
+
+/** Id de sessão sintética de um bot. */
+export function botSessionId(color: Color, unique = randomBytes(6).toString("hex")): string {
+  return `${BOT_SESSION_PREFIX}${color}:${unique}`;
+}
+
 function makeId(now: number): string {
   const d = new Date(now);
   const pad = (n: number): string => String(n).padStart(2, "0");
@@ -198,6 +229,7 @@ export class GameStore extends EventEmitter {
   private readonly defaultHumanName: string;
   private readonly defaultLlmName: string;
   private readonly sessionIdleMs: number;
+  private readonly restoreBots: boolean;
   private readonly now: () => number;
 
   private chess = new Chess();
@@ -229,6 +261,7 @@ export class GameStore extends EventEmitter {
     this.defaultHumanName = opts.defaultHumanName ?? "Você";
     this.defaultLlmName = opts.defaultLlmName ?? "Claude";
     this.sessionIdleMs = opts.sessionIdleMs ?? 120_000;
+    this.restoreBots = opts.restoreBots ?? true;
     this.now = opts.now ?? (() => Date.now());
     this.resetGame(DEFAULT_POSITION, {
       white: { kind: "human", name: this.defaultHumanName },
@@ -246,8 +279,46 @@ export class GameStore extends EventEmitter {
     if (init.kind === "empty") return { kind: "empty", name: init.name ?? "" };
     if (init.kind === "human") return { kind: "human", name: init.name?.trim() || this.defaultHumanName };
     const iso = this.nowIso();
-    const seat: Seat = { kind: "mcp", name: init.name?.trim() || this.defaultLlmName, connectedAt: iso, lastSeenAt: iso };
+    const seat: Seat = { kind: init.kind, name: init.name?.trim() || this.defaultLlmName, connectedAt: iso, lastSeenAt: iso };
     if (init.sessionId) seat.sessionId = init.sessionId;
+    if (init.kind === "bot") {
+      seat.bot = init.bot
+        ? { ...init.bot, usage: { ...init.bot.usage } }
+        : { providerId: "", model: "", toolMode: "native", status: "idle", usage: emptyBotUsage() };
+    }
+    return seat;
+  }
+
+  /**
+   * Atualiza `seat.bot` sem `touch()`: emite só "bot" (a UI recebe `{ type: "bot", color, bot }`),
+   * evitando rebroadcast do estado inteiro a cada "pensando…". Ver docs/09, seção 5.2.
+   */
+  updateBot(color: Color, patch: Partial<BotSeatInfo>): BotSeatInfo | null {
+    const seat = this.seats[color];
+    if (seat.kind !== "bot" || !seat.bot) return null;
+    const usage = patch.usage ? { ...seat.bot.usage, ...patch.usage } : { ...seat.bot.usage };
+    const next: BotSeatInfo = { ...seat.bot, ...patch, usage };
+    // Campos opcionais explicitamente apagados (statusText/thinkingSince) saem do objeto.
+    if (patch.statusText === undefined && "statusText" in patch) delete next.statusText;
+    if (patch.thinkingSince === undefined && "thinkingSince" in patch) delete next.thinkingSince;
+    seat.bot = next;
+    this.stateCache = null;
+    this.emit("bot", color, { ...next, usage: { ...next.usage } });
+    return next;
+  }
+
+  /** Info do bot de cada assento (para `ServerInfo.bots`). */
+  botSeats(): Record<Color, BotSeatInfo | null> {
+    const pick = (c: Color): BotSeatInfo | null => {
+      const seat = this.seats[c];
+      return seat.kind === "bot" && seat.bot ? { ...seat.bot, usage: { ...seat.bot.usage } } : null;
+    };
+    return { white: pick("white"), black: pick("black") };
+  }
+
+  private cloneSeat(color: Color): Seat {
+    const seat = { ...this.seats[color] };
+    if (seat.bot) seat.bot = { ...seat.bot, usage: { ...seat.bot.usage } };
     return seat;
   }
 
@@ -325,7 +396,7 @@ export class GameStore extends EventEmitter {
       updatedAt: this.updatedAt,
       status,
       result: this.result,
-      seats: { white: { ...this.seats.white }, black: { ...this.seats.black } },
+      seats: { white: this.cloneSeat("white"), black: this.cloneSeat("black") },
       startFen: this.startFen,
       fen: this.chess.fen(),
       turn: this.turn,
@@ -362,7 +433,11 @@ export class GameStore extends EventEmitter {
     const mcpSessions: ServerInfo["mcpSessions"] = [];
     for (const [sessionId, info] of this.sessions) {
       if (info.closed) continue;
+      // Sessões sintéticas de bots não entram na lista (a UI mostraria "sem conexão"): o
+      // status delas vai em ServerInfo.bots / seat.bot. Ver docs/09, seção 5.1.
+      if (sessionId.startsWith(BOT_SESSION_PREFIX)) continue;
       const seatColor = this.seatForSession(sessionId);
+      if (seatColor && this.seats[seatColor].kind === "bot") continue;
       const entry: ServerInfo["mcpSessions"][number] = { sessionId };
       if (seatColor) {
         entry.seat = seatColor;
@@ -398,10 +473,13 @@ export class GameStore extends EventEmitter {
 
   /** Sessão morta ou ociosa há mais de `sessionIdleMs`: o assento pode ser retomado. */
   private isSessionGone(seat: Seat): boolean {
-    if (seat.kind !== "mcp") return false;
+    if (!isAgentSeat(seat)) return false;
     if (!seat.sessionId) return true;
     const info = this.sessions.get(seat.sessionId);
     if (!info || info.closed) return true;
+    // Um bot pode ficar minutos "pensando" num modelo local: quem controla o ciclo de vida
+    // dele é o BotManager, não o relógio de ociosidade.
+    if (seat.kind === "bot") return false;
     const last = seat.lastSeenAt ? Date.parse(seat.lastSeenAt) : 0;
     return this.now() - last > this.sessionIdleMs;
   }
@@ -420,7 +498,7 @@ export class GameStore extends EventEmitter {
     if (!sessionId) return null;
     for (const color of ["white", "black"] as Color[]) {
       const seat = this.seats[color];
-      if (seat.kind === "mcp" && seat.sessionId === sessionId) return color;
+      if (isAgentSeat(seat) && seat.sessionId === sessionId) return color;
     }
     return null;
   }
@@ -445,7 +523,7 @@ export class GameStore extends EventEmitter {
     }
     for (const color of ["white", "black"] as Color[]) {
       const seat = this.seats[color];
-      if (seat.kind !== "mcp" || !seat.sessionId) continue;
+      if (!isAgentSeat(seat) || !seat.sessionId) continue;
       const wasSeated =
         previousSeats.white.sessionId === seat.sessionId || previousSeats.black.sessionId === seat.sessionId;
       if (wasSeated && seat.sessionId !== opts.bySessionId) this.pushEvent(color, "new_game");
@@ -471,7 +549,7 @@ export class GameStore extends EventEmitter {
 
   unseat(color: Color): GameState {
     const seat = this.seats[color];
-    if (seat.kind === "mcp" && seat.sessionId) {
+    if (isAgentSeat(seat) && seat.sessionId) {
       const sid = seat.sessionId;
       this.cancelWaiters((w) => w.sessionId === sid || w.color === color, "not_seated");
     }
@@ -516,6 +594,13 @@ export class GameStore extends EventEmitter {
         `O assento das ${colorPt} é do humano (${seat.name}). Use force: true para tomá-lo (o humano vira espectador) ou entre na outra cor.`,
       );
     }
+    if (seat.kind === "bot" && !opts.force) {
+      // Assento de bot nunca é "retomável" pelo nome: quem o libera é o BotManager (stop/leave).
+      throw new GameError(
+        "seat_taken",
+        `O assento das ${colorPt} está ocupado por um bot do servidor (${seat.name}). Use force: true para tomá-lo (o bot é parado) ou entre na outra cor.`,
+      );
+    }
     if (seat.kind === "mcp" && !opts.force && !this.isSessionGone(seat) && seat.name !== name) {
       throw new GameError(
         "seat_taken",
@@ -524,7 +609,7 @@ export class GameStore extends EventEmitter {
     }
 
     // Sessão anterior (se houver) perde o assento.
-    if (seat.kind === "mcp" && seat.sessionId && seat.sessionId !== opts.sessionId) {
+    if (isAgentSeat(seat) && seat.sessionId && seat.sessionId !== opts.sessionId) {
       const old = seat.sessionId;
       this.cancelWaiters((w) => w.sessionId === old, "not_seated");
     }
@@ -538,7 +623,7 @@ export class GameStore extends EventEmitter {
     this.queues[target] = [];
     this.setHeaders();
     const opp = otherColor(target);
-    if (this.seats[opp].kind === "mcp") this.pushEvent(opp, "opponent_joined");
+    if (isAgentSeat(this.seats[opp])) this.pushEvent(opp, "opponent_joined");
     this.touch();
     return target;
   }
@@ -641,7 +726,7 @@ export class GameStore extends EventEmitter {
     }
     for (const color of ["white", "black"] as Color[]) {
       if (color === by) continue;
-      if (this.seats[color].kind === "mcp") this.pushEvent(color, "takeback");
+      if (isAgentSeat(this.seats[color])) this.pushEvent(color, "takeback");
     }
     this.touch();
     return this.getState();
@@ -692,7 +777,7 @@ export class GameStore extends EventEmitter {
     if (this.humanMessages.length > MAX_MESSAGES) this.humanMessages.splice(0, this.humanMessages.length - MAX_MESSAGES);
     for (const color of ["white", "black"] as Color[]) {
       if (to !== "all" && to !== color) continue;
-      if (this.seats[color].kind === "mcp") this.pushEvent(color, "message");
+      if (isAgentSeat(this.seats[color])) this.pushEvent(color, "message");
     }
     this.touch();
     return msg;
@@ -736,7 +821,7 @@ export class GameStore extends EventEmitter {
     for (const color of ["white", "black"] as Color[]) {
       this.clearEvents(color, ["opponent_moved", "your_turn"]);
       if (color === by) continue;
-      if (this.seats[color].kind === "mcp") this.pushEvent(color, "game_over");
+      if (isAgentSeat(this.seats[color])) this.pushEvent(color, "game_over");
     }
     this.touch();
     return this.getState();
@@ -755,7 +840,7 @@ export class GameStore extends EventEmitter {
     const byName = this.seats[by].name || by;
     this.addComment("system", `${byName} oferece empate.`, "info");
     const opp = otherColor(by);
-    if (this.seats[opp].kind === "mcp") {
+    if (isAgentSeat(this.seats[opp])) {
       this.addHumanMessage('Ofereço empate. Para aceitar, chame end_game(how: "draw"); para recusar, apenas continue jogando.', opp);
     }
     this.touch();
@@ -951,10 +1036,25 @@ export class GameStore extends EventEmitter {
     this.emit("change", this.getState());
   }
 
+  /**
+   * Assentos MCP viram `empty` (as sessões morreram com o processo). Assentos `bot` continuam
+   * `bot` quando `restoreBots` (BOT_AUTORESUME) está ligado, com status "stopped" e sem
+   * `sessionId`: o BotManager decide recriar o BotPlayer (provedor ainda configurado) ou
+   * liberar o assento. Ver docs/09, seção 3.5.
+   */
   private restoreSeat(seat: Seat | undefined): Seat {
     if (!seat) return { kind: "empty", name: "" };
     if (seat.kind === "human") return { kind: "human", name: seat.name || this.defaultHumanName };
-    if (seat.kind === "mcp") return { kind: "empty", name: seat.name || "" };
+    if (seat.kind === "bot" && this.restoreBots && seat.bot) {
+      const iso = this.nowIso();
+      return {
+        kind: "bot",
+        name: seat.name || this.defaultLlmName,
+        connectedAt: iso,
+        lastSeenAt: iso,
+        bot: { ...seat.bot, status: "stopped", statusText: "aguardando o servidor retomar o bot", usage: { ...seat.bot.usage } },
+      };
+    }
     return { kind: "empty", name: seat.name || "" };
   }
 }

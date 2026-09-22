@@ -4,18 +4,55 @@
  */
 
 export type Color = "white" | "black";
-export type SeatKind = "human" | "mcp" | "empty";
+/**
+ * Quem ocupa um assento:
+ *  - "human": navegador (REST /api/move)
+ *  - "mcp":   sessão MCP externa (tools via /mcp)
+ *  - "bot":   BotPlayer interno do servidor, falando com um provedor de LLM (docs/09)
+ *  - "empty": livre
+ */
+export type SeatKind = "human" | "mcp" | "bot" | "empty";
+
+/** Estado do loop de um assento `bot` (docs/09, seção 5.1). */
+export type BotStatus = "idle" | "waiting" | "thinking" | "acting" | "error" | "budget_exceeded" | "stopped";
+
+export interface BotUsage {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens?: number;
+  estimatedCostUsd?: number;
+  illegalMoves: number;
+}
+
+/** Informação exibida/persistida de um assento `bot`. Nunca contém chaves de API. */
+export interface BotSeatInfo {
+  /** Id do provedor em providers.json, ex.: "openrouter". */
+  providerId: string;
+  /** Modelo, ex.: "anthropic/claude-sonnet-4.6". */
+  model: string;
+  profileId?: string;
+  toolMode: "native" | "text";
+  status: BotStatus;
+  /** Texto curto para a UI: "chave inválida", "429: aguardando 4 s"... */
+  statusText?: string;
+  /** ISO; a UI conta o tempo de "pensando…" a partir daqui. */
+  thinkingSince?: string;
+  usage: BotUsage;
+}
 
 export interface Seat {
   kind: SeatKind;
   /** Nome exibido: "Felipe", "Claude Desktop", "Claude Code"... */
   name: string;
-  /** Só para kind === "mcp": id da sessão Streamable HTTP que ocupa o assento. */
+  /** Para kind "mcp" (sessão Streamable HTTP) e "bot" (sessão sintética do servidor). */
   sessionId?: string;
-  /** ISO. Só para mcp. */
+  /** ISO. Só para mcp/bot. */
   connectedAt?: string;
   /** ISO. Última chamada de tool desta sessão (para a UI mostrar "pensando"/"ociosa"). */
   lastSeenAt?: string;
+  /** Só para kind === "bot". */
+  bot?: BotSeatInfo;
 }
 
 export type GameStatus = "waiting" | "active" | "finished";
@@ -66,7 +103,7 @@ export interface MoveRecord {
   isCheck: boolean;
   isCheckmate: boolean;
   fenAfter: string;
-  /** Quem executou: humano (navegador) ou sessão MCP. */
+  /** Quem executou: humano (navegador), sessão MCP ou bot interno. */
   by: SeatKind;
   /** Comentário enviado junto com o lance (make_move.comment). */
   comment?: string;
@@ -190,6 +227,7 @@ export interface GameState {
 export interface ServerInfo {
   version: string;
   mcpUrl: string; // ex.: http://localhost:3939/mcp
+  /** Só sessões MCP externas: sessões sintéticas de bots não entram aqui. */
   mcpSessions: {
     sessionId: string;
     name?: string;
@@ -198,22 +236,100 @@ export interface ServerInfo {
     /** true enquanto a sessão está bloqueada em wait_for_turn (UI: "aguardando"). */
     waiting?: boolean;
   }[];
+  /** Provedores configurados (sem chaves). Ausente se a camada de provedores não está ativa. */
+  providers?: ProviderPublic[];
+  /** Perfis de bot disponíveis (docs/09, seção 4.2). */
+  profiles?: BotProfile[];
+  /** Status dos assentos `bot` da partida atual. */
+  bots?: Record<Color, BotSeatInfo | null>;
 }
 
 export type WsServerMessage =
   | { type: "hello"; state: GameState; server: ServerInfo }
   | { type: "state"; state: GameState }
-  | { type: "server"; server: ServerInfo };
+  | { type: "server"; server: ServerInfo }
+  /** Mudança de status/uso de um bot, sem reenviar o estado inteiro. */
+  | { type: "bot"; color: Color; bot: BotSeatInfo };
 
 /* ---------- REST (navegador → servidor) ---------- */
 
 export type HumanSeating = "white" | "black" | "both" | "none";
 
+export type BotRole = "teacher" | "opponent" | "silent";
+export type StudentLevel = "beginner" | "intermediate" | "advanced";
+
+/** Pedido de ocupação de um assento em `POST /api/game` (docs/09, seção 5.1). */
+export type SeatRequest =
+  | { kind: "human"; name?: string }
+  /** Assento fica vazio, aguardando `join_game` de uma sessão MCP. */
+  | { kind: "mcp"; name?: string }
+  | { kind: "empty"; name?: string }
+  | {
+      kind: "bot";
+      profileId?: string;
+      providerId?: string;
+      model?: string;
+      name?: string;
+      role?: BotRole;
+      level?: StudentLevel;
+    };
+
 export interface NewGameRequest {
-  /** Quais assentos o humano ocupa. "none" = assistir LLM vs LLM. */
-  humanSeats: HumanSeating;
+  /** Quais assentos o humano ocupa. "none" = assistir LLM vs LLM. Legado: `seats` tem precedência. */
+  humanSeats?: HumanSeating;
   humanName?: string;
   startFen?: string;
+  /** Novo (docs/09): controle explícito de cada assento. Tem precedência sobre `humanSeats`. */
+  seats?: { white: SeatRequest; black: SeatRequest };
+}
+
+/* ---------- Provedores de LLM e perfis de bot (docs/09) ---------- */
+
+export type ProviderKind = "openai" | "anthropic";
+export type ToolMode = "native" | "text" | "auto";
+
+/** Visão pública de um provedor: NUNCA contém a chave de API. */
+export interface ProviderPublic {
+  id: string;
+  name: string;
+  kind: ProviderKind;
+  baseUrl?: string;
+  /** Nome da variável de ambiente que guarda a chave, ex.: "OPENROUTER_API_KEY". */
+  apiKeyEnv?: string;
+  hasApiKey: boolean;
+  /** Ex.: "sk-or-…a1b2". Só os últimos caracteres. */
+  apiKeyMasked?: string;
+  toolMode: ToolMode;
+  local: boolean;
+  paid: boolean;
+  lastTest?: { ok: boolean; at: string; latencyMs?: number; error?: string; models?: number };
+}
+
+export interface BotLimits {
+  maxTokensPerGame?: number;
+  maxUsdPerGame?: number;
+  maxIterationsPerTurn?: number;
+}
+
+export interface BotProfile {
+  id: string;
+  name: string;
+  providerId: string;
+  model: string;
+  role: BotRole;
+  level: StudentLevel;
+  temperature?: number;
+  toolMode?: "native" | "text";
+  historyTurns?: number;
+  limits?: BotLimits;
+}
+
+export interface ModelInfo {
+  id: string;
+  name?: string;
+  contextLength?: number;
+  supportsTools?: boolean;
+  pricing?: { prompt?: number; completion?: number };
 }
 
 export interface MoveRequest {

@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "kind": "openai",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "paid": true,
+      "toolMode": "native",
+      "modelsQuery": "supported_parameters=tools",
+      "extraHeaders": { "HTTP-Referer": "http://localhost:3939", "X-Title": "LLM Xadrez" },
+      "extraBody": { "usage": { "include": true }, "reasoning": { "effort": "low" } },
+      "timeoutMs": 60000
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic (API direta)",
+      "kind": "anthropic",
+      "apiKeyEnv": "ANTHROPIC_API_KEY",
+      "paid": true,
+      "toolMode": "native",
+      "extraBody": { "thinking": { "type": "adaptive" }, "output_config": { "effort": "low" } }
+    },
+    {
+      "id": "lmstudio",
+      "name": "LM Studio (local)",
+      "kind": "openai",
+      "baseUrl": "http://localhost:1234/v1",
+      "local": true,
+      "toolMode": "auto",
+      "timeoutMs": 180000
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama (local)",
+      "kind": "openai",
+      "baseUrl": "http://localhost:11434/v1",
+      "local": true,
+      "toolMode": "auto",
+      "toolChoice": false,
+      "timeoutMs": 180000
+    },
+    {
+      "id": "litellm",
+      "name": "LiteLLM (proxy)",
+      "kind": "openai",
+      "baseUrl": "http://localhost:4000/v1",
+      "apiKeyEnv": "LITELLM_API_KEY",
+      "toolMode": "native"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "professora-sonnet",
+      "name": "Professora (Claude Sonnet via OpenRouter)",
+      "providerId": "openrouter",
+      "model": "anthropic/claude-sonnet-4.6",
+      "role": "teacher",
+      "level": "beginner",
+      "temperature": 0.7,
+      "historyTurns": 4,
+      "limits": { "maxUsdPerGame": 1.0, "maxTokensPerGame": 400000, "maxIterationsPerTurn": 6 }
+    },
+    {
+      "id": "opus-direto",
+      "name": "Professor (Claude Opus 5, API Anthropic)",
+      "providerId": "anthropic",
+      "model": "claude-opus-5",
+      "role": "teacher",
+      "level": "intermediate",
+      "limits": { "maxUsdPerGame": 2.0 }
+    },
+    {
+      "id": "local-qwen",
+      "name": "Adversário local (Qwen3 8B)",
+      "providerId": "lmstudio",
+      "model": "qwen3-8b",
+      "role": "opponent",
+      "level": "beginner",
+      "toolMode": "text",
+      "temperature": 0.3,
+      "historyTurns": 2,
+      "limits": { "maxIterationsPerTurn": 4 }
+    }
+  ],
+  "defaults": {
+    "profileId": "professora-sonnet",
+    "onMoveFailure": { "vsHuman": "pause", "vsBot": "random_legal" }
+  }
+}

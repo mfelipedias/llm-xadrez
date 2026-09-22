@@ -14,9 +14,11 @@
     "test:watch": "vitest --config server/vitest.config.ts",
     "smoke": "tsx scripts/mcp-smoke.ts",
     "play": "tsx scripts/mcp-play.ts",
+    "smoke:bot": "tsx scripts/bot-smoke.ts",
     "typecheck": "tsc -p server --noEmit && tsc -p web --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "chess.js": "^1.4.0",
     "dotenv": "^17.2.3",
