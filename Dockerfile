@@ -3,7 +3,7 @@ FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
-COPY tsconfig.base.json ./
+COPY tsconfig.base.json providers.json ./
 COPY shared ./shared
 COPY server ./server
 COPY web ./web
@@ -18,7 +18,7 @@ ENV NODE_ENV=production \
     DATA_DIR=/app/data
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/tsconfig.base.json ./
+COPY --from=build /app/tsconfig.base.json /app/providers.json ./
 COPY --from=build /app/shared ./shared
 COPY --from=build /app/server ./server
 COPY --from=build /app/scripts ./scripts

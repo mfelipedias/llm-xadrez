@@ -16,7 +16,23 @@ services:
       MCP_TOKEN: ${MCP_TOKEN:-}
       # URL anunciada aos clientes (banner, /api/health, UI). Mude se trocar a porta do host.
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3939}
+
+      # --- Bots do servidor (docs/09). Opcional: sem chave, o container roda só com MCP. ---
+      # As chaves vêm do .env da raiz e ficam SÓ no ambiente: providers.json guarda
+      # apenas o nome da variável (apiKeyEnv).
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      # Arquivo de provedores/perfis (montado abaixo).
+      PROVIDERS_FILE: /app/providers.json
+      # Recria os bots do current-game.json quando o container reinicia.
+      BOT_AUTORESUME: ${BOT_AUTORESUME:-true}
+      # Perfil sugerido na UI (vazio = defaults.profileId do providers.json).
+      BOT_DEFAULT_PROFILE: ${BOT_DEFAULT_PROFILE:-}
     volumes:
       # Partidas e estado atual persistem fora do container.
       - ./data:/app/data
+      # Provedores e perfis de bot: o arquivo não vai na imagem, então é montado do host.
+      # Leitura e escrita, para a tela "Provedores" poder gravar.
+      - ./providers.json:/app/providers.json
     restart: unless-stopped
