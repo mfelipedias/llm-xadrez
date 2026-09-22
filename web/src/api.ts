@@ -8,20 +8,28 @@
 import { useEffect, useState } from "react";
 import type {
   ApiError as ApiErrorBody,
+  BotProfile,
   Color,
   GameState,
   MessageRequest,
+  ModelInfo,
   MoveRequest,
   NewGameRequest,
+  ProviderPublic,
   ResignRequest,
   ServerInfo,
   TakebackRequest,
   WsServerMessage,
 } from "@shared/types";
-import { mockServer, mockState } from "./dev/fixtures";
+import { mockFixture, mockRequest } from "./dev/fixtures";
 
-export const isMock: boolean =
-  new URLSearchParams(window.location.search).get("mock") === "1";
+/**
+ * `?mock=1` usa o cenário padrão; `?mock=waiting|llmvsllm|finished|empty|bots|botsvsbots`
+ * escolhe um dos cenários de `dev/fixtures.ts` (docs/10 §7, docs/09 §4.3).
+ */
+const mockParam: string | null = new URLSearchParams(window.location.search).get("mock");
+export const isMock: boolean = mockParam !== null && mockParam !== "" && mockParam !== "0";
+const fixture = isMock ? mockFixture(mockParam === "1" ? "default" : (mockParam as string)) : null;
 
 /** Erro de API com status HTTP e, em lance ilegal, a lista de lances legais. */
 export class ApiError extends Error {
@@ -42,8 +50,11 @@ function isApiErrorBody(value: unknown): value is Partial<ApiErrorBody> {
 
 async function request(path: string, init?: RequestInit): Promise<unknown> {
   if (isMock) {
-    console.info(`[mock] ${init?.method ?? "GET"} ${path}`, init?.body ?? "");
-    return null;
+    const method = init?.method ?? "GET";
+    console.info(`[mock] ${method} ${path}`, init?.body ?? "");
+    // Os cenários de fixture respondem às rotas de leitura (provedores, modelos,
+    // teste) para que a tela "Provedores" possa ser vista sem servidor.
+    return mockRequest(path, method);
   }
   let response: Response;
   try {
@@ -74,12 +85,37 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
   return body;
 }
 
-function post(path: string, payload: unknown): Promise<unknown> {
+function send(method: "POST" | "PUT" | "DELETE", path: string, payload?: unknown): Promise<unknown> {
   return request(path, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload ?? {}),
   });
+}
+
+function post(path: string, payload: unknown): Promise<unknown> {
+  return send("POST", path, payload);
+}
+
+/** Corpo de `/api/bots/:color/{sit,resume}`: um `SeatRequest` de bot sem o `kind`. */
+export interface BotSeatBody {
+  profileId?: string;
+  providerId?: string;
+  model?: string;
+  name?: string;
+}
+
+export interface ProvidersResponse {
+  providers: ProviderPublic[];
+  profiles: BotProfile[];
+  presets: string[];
+}
+
+export interface ProviderTestResult {
+  ok: boolean;
+  latencyMs?: number;
+  models?: number;
+  error?: string;
 }
 
 export const api = {
@@ -108,6 +144,62 @@ export const api = {
   async clearHighlight(): Promise<void> {
     await post("/api/highlight/clear", {});
   },
+
+  /**
+   * Bots internos do servidor (docs/09 §5.3). Todas devolvem o `GameState`
+   * novo, mas a UI ignora: o WebSocket entrega o mesmo estado logo em seguida.
+   */
+  bots: {
+    async sit(color: Color, body: BotSeatBody): Promise<void> {
+      await post(`/api/bots/${color}/sit`, body);
+    },
+    async stop(color: Color): Promise<void> {
+      await post(`/api/bots/${color}/stop`, {});
+    },
+    /** Sem corpo retoma o mesmo modelo; com `profileId`/`model` troca de modelo. */
+    async resume(color: Color, body: BotSeatBody = {}): Promise<void> {
+      await post(`/api/bots/${color}/resume`, body);
+    },
+    async leave(color: Color): Promise<void> {
+      await post(`/api/bots/${color}/leave`, {});
+    },
+  },
+
+  /**
+   * Provedores de LLM (docs/09 §5.3). Nenhuma destas chamadas envia ou recebe
+   * chave de API: o servidor devolve só `hasApiKey`/`apiKeyMasked`.
+   */
+  providers: {
+    async list(): Promise<ProvidersResponse> {
+      const body = (await request("/api/providers")) as ProvidersResponse | null;
+      return body ?? { providers: [], profiles: [], presets: [] };
+    },
+    async test(id: string): Promise<ProviderTestResult> {
+      try {
+        const body = (await post(`/api/providers/${encodeURIComponent(id)}/test`, {})) as ProviderTestResult | null;
+        return body ?? { ok: true };
+      } catch (err) {
+        if (err instanceof ApiError) return { ok: false, error: err.message };
+        throw err;
+      }
+    },
+    async models(id: string, refresh = false): Promise<ModelInfo[]> {
+      const query = refresh ? "?refresh=1" : "";
+      const body = (await request(`/api/providers/${encodeURIComponent(id)}/models${query}`)) as ModelInfo[] | null;
+      return body ?? [];
+    },
+    /** Grava `baseUrl`/`apiKeyEnv`/flags. Nunca `apiKey` — o servidor recusa. */
+    async save(id: string, patch: Record<string, unknown>): Promise<void> {
+      await send("PUT", `/api/providers/${encodeURIComponent(id)}`, patch);
+    },
+    async addPreset(preset: string, id?: string): Promise<void> {
+      await post("/api/providers/preset", id ? { preset, id } : { preset });
+    },
+    async remove(id: string): Promise<void> {
+      await send("DELETE", `/api/providers/${encodeURIComponent(id)}`);
+    },
+  },
+
   pgnUrl: "/api/pgn",
 };
 
@@ -128,8 +220,8 @@ function wsUrl(): string {
  * e reconecta com backoff exponencial (1 s → 10 s).
  */
 export function useGameSocket(): GameConnection {
-  const [state, setState] = useState<GameState | null>(isMock ? mockState : null);
-  const [server, setServer] = useState<ServerInfo | null>(isMock ? mockServer : null);
+  const [state, setState] = useState<GameState | null>(fixture?.state ?? null);
+  const [server, setServer] = useState<ServerInfo | null>(fixture?.server ?? null);
   const [connected, setConnected] = useState<boolean>(isMock);
 
   useEffect(() => {
@@ -166,6 +258,25 @@ export function useGameSocket(): GameConnection {
           break;
         case "server":
           setServer(msg.server);
+          break;
+        case "bot":
+          /*
+           * Status/uso de um bot sem o estado inteiro (docs/09 §5.4): o patch
+           * entra no assento e no `server.bots` para a UI não piscar.
+           */
+          setState((current) =>
+            current && current.seats[msg.color].kind === "bot"
+              ? {
+                  ...current,
+                  seats: { ...current.seats, [msg.color]: { ...current.seats[msg.color], bot: msg.bot } },
+                }
+              : current,
+          );
+          setServer((current) =>
+            current
+              ? { ...current, bots: { white: null, black: null, ...(current.bots ?? {}), [msg.color]: msg.bot } }
+              : current,
+          );
           break;
         default:
           console.warn("[ws] tipo desconhecido", msg);

@@ -1,5 +1,13 @@
+/**
+ * Tabela de lances — a aba "Lances" do Caderno (decisão 9.2). No desktop a
+ * navegação principal é a régua sob o tabuleiro (`MoveRibbon`); esta visão
+ * existe para quem prefere ler a partida em colunas.
+ *
+ * O cabeçalho saiu: quem o desenha agora é a aba do `Notebook`.
+ */
 import { useEffect, useRef } from "react";
 import type { MoveRecord } from "@shared/types";
+import { San } from "./San";
 
 interface MoveListProps {
   history: MoveRecord[];
@@ -42,29 +50,25 @@ export function MoveList({ history, selectedPly, onSelect }: MoveListProps) {
         <button
           type="button"
           ref={active ? activeRef : undefined}
-          className={`mv${active ? " is-active" : ""}${move.by === "mcp" ? " mv-ai" : ""}`}
+          className={`mv${active ? " is-active" : ""}${move.by !== "human" ? " mv-ai" : ""}`}
           onClick={() => onSelect(move.ply === lastPly ? null : move.ply)}
           aria-current={active ? "true" : undefined}
+          aria-label={`Ver posição após ${move.color === "white" ? `${move.moveNumber}.` : `${move.moveNumber}…`} ${move.san}`}
         >
-          {move.san}
+          <San san={move.san} />
         </button>
       </td>
     );
   };
 
   return (
-    <section className="movelist" aria-label="Lances">
-      <header className="panel-title">
-        <span>Lances</span>
-        <span className="panel-subtitle">
-          {history.length === 0 ? "nenhum ainda" : `${history.length} meios-lances`}
-        </span>
-      </header>
+    <div className="movelist">
       <div className="movelist-scroll">
         {history.length === 0 ? (
-          <p className="feed-empty">A partida ainda não começou.</p>
+          <p className="feed-empty">Nenhum lance ainda.</p>
         ) : (
           <table>
+            <caption className="sr-only">Lances da partida; escolha um para ver a posição.</caption>
             <tbody>
               <tr>
                 <td className="mv-num">
@@ -72,12 +76,15 @@ export function MoveList({ history, selectedPly, onSelect }: MoveListProps) {
                     type="button"
                     className={`mv mv-start${activePly === 0 ? " is-active" : ""}`}
                     onClick={() => onSelect(0)}
+                    aria-label="Ver a posição inicial"
                     title="Posição inicial"
                   >
-                    ⟲
+                    <span aria-hidden="true">⟲</span>
                   </button>
                 </td>
-                <td colSpan={2} className="mv-empty">posição inicial</td>
+                <td colSpan={2} className="mv-empty">
+                  posição inicial
+                </td>
               </tr>
               {rows.map((row) => (
                 <tr key={row.moveNumber}>
@@ -90,12 +97,48 @@ export function MoveList({ history, selectedPly, onSelect }: MoveListProps) {
           </table>
         )}
       </div>
-      <div className="movelist-nav" aria-label="Navegar no histórico">
-        <button type="button" className="btn btn-small" onClick={() => onSelect(0)} disabled={history.length === 0 || activePly === 0} title="Início (Home)">⏮</button>
-        <button type="button" className="btn btn-small" onClick={() => onSelect(Math.max(0, activePly - 1))} disabled={history.length === 0 || activePly === 0} title="Anterior (←)">◀</button>
-        <button type="button" className="btn btn-small" onClick={() => onSelect(activePly + 1 >= lastPly ? null : activePly + 1)} disabled={selectedPly === null} title="Próximo (→)">▶</button>
-        <button type="button" className="btn btn-small" onClick={() => onSelect(null)} disabled={selectedPly === null} title="Ao vivo (End)">⏭</button>
+      <div className="movelist-nav" role="group" aria-label="Navegar no histórico">
+        <button
+          type="button"
+          className="btn btn-small"
+          onClick={() => onSelect(0)}
+          disabled={history.length === 0 || activePly === 0}
+          aria-label="Posição inicial"
+          title="Início (Home)"
+        >
+          <span aria-hidden="true">⏮</span>
+        </button>
+        <button
+          type="button"
+          className="btn btn-small"
+          onClick={() => onSelect(Math.max(0, activePly - 1))}
+          disabled={history.length === 0 || activePly === 0}
+          aria-label="Lance anterior"
+          title="Anterior (←)"
+        >
+          <span aria-hidden="true">◀</span>
+        </button>
+        <button
+          type="button"
+          className="btn btn-small"
+          onClick={() => onSelect(activePly + 1 >= lastPly ? null : activePly + 1)}
+          disabled={selectedPly === null}
+          aria-label="Próximo lance"
+          title="Próximo (→)"
+        >
+          <span aria-hidden="true">▶</span>
+        </button>
+        <button
+          type="button"
+          className="btn btn-small"
+          onClick={() => onSelect(null)}
+          disabled={selectedPly === null}
+          aria-label="Voltar ao lance ao vivo"
+          title="Ao vivo (End)"
+        >
+          <span aria-hidden="true">⏭</span>
+        </button>
       </div>
-    </section>
+    </div>
   );
 }

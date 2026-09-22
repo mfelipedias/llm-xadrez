@@ -1,16 +1,42 @@
-import type { Color, GameState } from "@shared/types";
+/**
+ * Frases de status da partida. Antes vivia em `StatusBar.tsx`; o `StatusBar` saiu
+ * (docs/10 §5.1) e o texto migrou para a `SeatPlate` (vez/xeque), o `GameBanner`
+ * (fim de partida) e uma região `aria-live` invisível.
+ */
+import type { Color, GameState, Seat, SeatKind } from "@shared/types";
 
-const COLOR_LABEL: Record<Color, string> = { white: "brancas", black: "pretas" };
+export const COLOR_LABEL: Record<Color, string> = { white: "brancas", black: "pretas" };
+export const COLOR_TITLE: Record<Color, string> = { white: "Brancas", black: "Pretas" };
 
-function opposite(color: Color): Color {
+export function opposite(color: Color): Color {
   return color === "white" ? "black" : "white";
+}
+
+/** Tolerante a `SeatKind` novos (ex.: "bot"): qualquer coisa que não seja humano/vazio é IA. */
+export function isAiSeat(seat: Seat): boolean {
+  return seat.kind !== "human" && seat.kind !== "empty";
+}
+
+export function seatKindLabel(kind: SeatKind): string {
+  switch (kind) {
+    case "human":
+      return "humano";
+    case "mcp":
+      return "IA via MCP";
+    case "empty":
+      return "assento livre";
+    case "bot":
+      return "IA do servidor";
+    default:
+      return "IA";
+  }
 }
 
 /** Nome do ocupante ou, se o assento ficou vazio (leave_game), o nome da cor. */
 function seatName(state: GameState, color: Color): string {
   const name = state.seats[color].name.trim();
   if (name) return name;
-  return color === "white" ? "Brancas" : "Pretas";
+  return COLOR_TITLE[color];
 }
 
 export function statusText(state: GameState): string {
@@ -55,23 +81,13 @@ export function statusText(state: GameState): string {
   if (seat.kind === "human") {
     const bothHuman = seats.white.kind === "human" && seats.black.kind === "human";
     text = `Vez das ${COLOR_LABEL[state.turn]} (${bothHuman ? seat.name : "você"})`;
-  } else if (seat.kind === "mcp") {
-    text = `${seat.name} está pensando…`;
-  } else {
+  } else if (seat.kind === "empty") {
     text = `Aguardando a IA entrar (${COLOR_LABEL[state.turn]})`;
+  } else {
+    text = `${seat.name} está pensando…`;
   }
   if (state.drawOffer) {
     text += ` · ${seats[state.drawOffer.by].name} ofereceu empate`;
   }
   return prefix + text;
-}
-
-export function StatusBar({ state }: { state: GameState }) {
-  const text = statusText(state);
-  const tone = state.status === "finished" ? "finished" : state.inCheck ? "check" : "normal";
-  return (
-    <div className={`status-bar status-${tone}`} role="status" aria-live="polite">
-      {text}
-    </div>
-  );
 }

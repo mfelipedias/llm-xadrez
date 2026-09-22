@@ -1,8 +1,12 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Chessboard } from "react-chessboard";
 import type { Arrow, PieceDropHandlerArgs, PieceHandlerArgs, SquareHandlerArgs } from "react-chessboard";
 import { Chess, type Move, type Square } from "chess.js";
 import type { Color, GameState, HighlightSpec, MoveRecord } from "@shared/types";
+import { useCssColors } from "../theme";
+import { BoardKeyboard } from "./BoardKeyboard";
+import { Figurine } from "./Figurine";
+import { COLOR_LABEL } from "../status";
 
 interface BoardProps {
   state: GameState;
@@ -14,35 +18,45 @@ interface BoardProps {
   interactive: boolean;
   orientation: Color;
   highlight: HighlightSpec | null;
+  /** "light" | "dark" — só para reler os tokens de cor das setas quando o tema muda. */
+  themeSignal: string;
+  reducedMotion: boolean;
   /** Envia o lance em UCI. Deve rejeitar (throw) se o servidor recusar. */
   onMove: (uci: string) => Promise<void>;
-  /** Mudar este valor remonta o tabuleiro (usado para desfazer um drop recusado). */
-  resetKey: number;
 }
 
-const HIGHLIGHT_COLORS: Record<string, string> = {
-  green: "#22b14c",
-  red: "#e53935",
-  blue: "#1e88e5",
-  yellow: "#fdd835",
-  orange: "#fb8c00",
-  purple: "#8e24aa",
+/**
+ * As quatro cores semânticas do plano (docs/10 §2.4) + as duas tintas.
+ * Casas usam `var()` direto (estilo inline resolve); setas precisam do valor
+ * calculado porque viram atributos SVG.
+ */
+const SEMANTIC_VAR: Record<string, string> = {
+  green: "--good",
+  red: "--threat",
+  blue: "--ink",
+  yellow: "--attn-bright",
+  orange: "--attn-bright",
+  purple: "--ink-2",
 };
 
-function cssColor(color: string | undefined, fallback: string): string {
-  if (!color) return fallback;
-  return HIGHLIGHT_COLORS[color.toLowerCase()] ?? color;
+const ARROW_TOKENS = ["--good", "--threat", "--ink", "--attn-bright", "--ink-2"] as const;
+
+/** Cor de casa: `var(--good)` etc.; qualquer outra string CSS passa direto. */
+function squareColor(color: string | undefined): string {
+  const token = SEMANTIC_VAR[(color ?? "green").toLowerCase()];
+  return token ? `var(${token})` : (color as string);
 }
 
 function overlay(color: string, alpha: number): string {
-  return `linear-gradient(color-mix(in srgb, ${color} ${Math.round(alpha * 100)}%, transparent), color-mix(in srgb, ${color} ${Math.round(alpha * 100)}%, transparent))`;
+  const mix = `color-mix(in oklab, ${color} ${Math.round(alpha * 100)}%, transparent)`;
+  return `linear-gradient(${mix}, ${mix})`;
 }
 
-const PROMOTION_PIECES: { piece: "q" | "r" | "b" | "n"; label: string; glyph: Record<Color, string> }[] = [
-  { piece: "q", label: "Dama", glyph: { white: "♕", black: "♛" } },
-  { piece: "r", label: "Torre", glyph: { white: "♖", black: "♜" } },
-  { piece: "b", label: "Bispo", glyph: { white: "♗", black: "♝" } },
-  { piece: "n", label: "Cavalo", glyph: { white: "♘", black: "♞" } },
+const PROMOTION_PIECES: { piece: "q" | "r" | "b" | "n"; key: "Q" | "R" | "B" | "N"; label: string }[] = [
+  { piece: "q", key: "Q", label: "Dama" },
+  { piece: "r", key: "R", label: "Torre" },
+  { piece: "b", key: "B", label: "Bispo" },
+  { piece: "n", key: "N", label: "Cavalo" },
 ];
 
 export function Board({
@@ -53,8 +67,9 @@ export function Board({
   interactive,
   orientation,
   highlight,
+  themeSignal,
+  reducedMotion,
   onMove,
-  resetKey,
 }: BoardProps) {
   const chess = useMemo(() => {
     try {
@@ -70,18 +85,66 @@ export function Board({
 
   const [selected, setSelected] = useState<Square | null>(null);
   const [promotion, setPromotion] = useState<{ from: Square; to: Square } | null>(null);
+  /**
+   * Lance otimista: a posição resultante é mostrada na hora (a peça anda com a
+   * animação da lib) e, se o servidor recusar, volta a `fen` — o que faz a peça
+   * **voltar animada** em vez de remontar o tabuleiro com uma `key` (docs/10 §4
+   * e pendência da Fase 1).
+   */
+  const [pendingFen, setPendingFen] = useState<string | null>(null);
+  const promoDialog = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
     setSelected(null);
     setPromotion(null);
+    setPendingFen(null);
   }, [fen, interactive]);
+
+  useEffect(() => {
+    const dialog = promoDialog.current;
+    if (!dialog) return;
+    if (promotion && !dialog.open) dialog.showModal();
+    if (!promotion && dialog.open) dialog.close();
+  }, [promotion]);
+
+  /*
+   * O react-chessboard embrulha cada peça num `div[role="button"][tabindex="0"]`
+   * do dnd-kit, sem nome acessível: são 27 paradas de tabulação anônimas (axe:
+   * `aria-command-name`, serious) e um atalho de arrastar por teclado em inglês
+   * que concorre com a grade acessível daqui. Como a lib não deixa desligar
+   * isso, um observador limpa os atributos assim que eles aparecem — a peça
+   * continua arrastável com o mouse, e o teclado usa o `BoardKeyboard`.
+   */
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const root = wrapRef.current;
+    if (!root) return;
+    const sanitize = () => {
+      for (const el of root.querySelectorAll('[aria-roledescription="draggable"]')) {
+        el.removeAttribute("role");
+        el.removeAttribute("tabindex");
+        el.removeAttribute("aria-roledescription");
+        el.removeAttribute("aria-describedby");
+        el.setAttribute("aria-hidden", "true");
+      }
+      // Instrução de arrastar do dnd-kit (em inglês) sem quem a referencie.
+      const hint = document.getElementById("dnd-main-board");
+      if (hint) hint.textContent = "";
+    };
+    sanitize();
+    const observer = new MutationObserver(sanitize);
+    observer.observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ["role", "tabindex"] });
+    return () => observer.disconnect();
+  }, []);
+
+  const arrowColors = useCssColors(ARROW_TOKENS, themeSignal);
 
   const legalTargets: Move[] = useMemo(() => {
     if (!chess || !selected) return [];
     return chess.moves({ square: selected, verbose: true });
   }, [chess, selected]);
 
-  const lastMove = isPreview ? previewMove : state.lastMove ?? null;
+  const lastMove = isPreview ? previewMove : (state.lastMove ?? null);
 
   const kingInCheck: Square | null = useMemo(() => {
     if (!chess || !chess.inCheck()) return null;
@@ -97,56 +160,79 @@ export function Board({
       list.push(layer);
       layers.set(square, list);
     };
+    const merge = (square: string, style: CSSProperties) => {
+      extra.set(square, { ...(extra.get(square) ?? {}), ...style });
+    };
 
+    // Último lance: lavagem âmbar dessaturada (fica fora da escala semântica).
     if (lastMove) {
-      add(lastMove.from, overlay("#f6d55c", 0.45));
-      add(lastMove.to, overlay("#f6d55c", 0.55));
+      add(lastMove.from, `linear-gradient(var(--sq-last), var(--sq-last))`);
+      add(lastMove.to, `linear-gradient(var(--sq-last-to), var(--sq-last-to))`);
     }
+    // Casas desenhadas pela IA: preenchimento + contorno interno (redundância p/ daltonismo).
     if (highlight) {
       for (const sq of highlight.squares) {
-        add(sq.square, overlay(cssColor(sq.color, HIGHLIGHT_COLORS.green), 0.6));
+        const color = squareColor(sq.color);
+        add(sq.square, overlay(color, 0.55));
+        merge(sq.square, { boxShadow: `inset 0 0 0 3px ${color}` });
       }
     }
     if (kingInCheck) {
       add(
         kingInCheck,
-        "radial-gradient(circle, rgba(229,57,53,0.95) 0%, rgba(229,57,53,0.65) 40%, rgba(229,57,53,0) 72%)",
+        "radial-gradient(circle, color-mix(in oklab, var(--threat) 92%, transparent) 0%, color-mix(in oklab, var(--threat) 60%, transparent) 40%, transparent 72%)",
       );
+      merge(kingInCheck, { boxShadow: "inset 0 0 0 2px var(--threat)" });
     }
+    // Seleção: contorno, não preenchimento.
     if (selected) {
-      add(selected, overlay("#3fa7ff", 0.55));
+      merge(selected, { boxShadow: "inset 0 0 0 3px var(--ink)" });
     }
     for (const move of legalTargets) {
       const isCapture = move.isCapture();
       add(
         move.to,
         isCapture
-          ? "radial-gradient(circle, transparent 60%, rgba(20,20,20,0.35) 62%, rgba(20,20,20,0.35) 74%, transparent 76%)"
-          : "radial-gradient(circle, rgba(20,20,20,0.35) 0%, rgba(20,20,20,0.35) 19%, transparent 21%)",
+          ? "radial-gradient(circle, transparent 60%, var(--sq-dot) 62%, var(--sq-dot) 74%, transparent 76%)"
+          : "radial-gradient(circle, var(--sq-dot) 0%, var(--sq-dot) 19%, transparent 21%)",
       );
-      extra.set(move.to, { cursor: "pointer" });
+      merge(move.to, { cursor: "pointer" });
     }
 
     const result: Record<string, CSSProperties> = {};
-    for (const [square, list] of layers) {
-      // Camadas mais recentes (seleção, destinos) ficam por cima.
-      result[square] = { ...(extra.get(square) ?? {}), backgroundImage: [...list].reverse().join(", ") };
+    const squares = new Set([...layers.keys(), ...extra.keys()]);
+    for (const square of squares) {
+      const list = layers.get(square);
+      result[square] = {
+        ...(extra.get(square) ?? {}),
+        // Camadas mais recentes (seleção, destinos) ficam por cima.
+        ...(list ? { backgroundImage: [...list].reverse().join(", ") } : {}),
+      };
     }
     return result;
   }, [lastMove, highlight, kingInCheck, selected, legalTargets]);
 
   const arrows: Arrow[] = useMemo(
     () =>
-      (highlight?.arrows ?? []).map((a) => ({
-        startSquare: a.from,
-        endSquare: a.to,
-        color: cssColor(a.color, HIGHLIGHT_COLORS.green),
-      })),
-    [highlight],
+      (highlight?.arrows ?? []).map((a) => {
+        const token = SEMANTIC_VAR[(a.color ?? "green").toLowerCase()];
+        const resolved = token ? arrowColors[token] : undefined;
+        return {
+          startSquare: a.from,
+          endSquare: a.to,
+          color: resolved || (token ? "#2e8b57" : (a.color as string)),
+        };
+      }),
+    [highlight, arrowColors],
   );
 
+  const send = (uci: string, nextFen: string) => {
+    setPendingFen(nextFen);
+    onMove(uci).catch(() => setPendingFen(null));
+  };
+
   const attemptMove = (from: Square, to: Square): boolean => {
-    if (!chess || !interactive) return false;
+    if (!chess || !interactive || pendingFen) return false;
     const candidates = chess.moves({ square: from, verbose: true }).filter((m) => m.to === to);
     if (candidates.length === 0) return false;
     setSelected(null);
@@ -154,7 +240,7 @@ export function Board({
       setPromotion({ from, to });
       return false;
     }
-    void onMove(`${from}${to}`);
+    send(`${from}${to}`, candidates[0].after);
     return true;
   };
 
@@ -164,7 +250,7 @@ export function Board({
   };
 
   const onSquareClick = ({ square, piece }: SquareHandlerArgs) => {
-    if (!interactive || !chess) return;
+    if (!interactive || !chess || pendingFen) return;
     const sq = square as Square;
     if (selected) {
       if (selected === sq) {
@@ -178,37 +264,47 @@ export function Board({
   };
 
   const canDragPiece = ({ piece }: PieceHandlerArgs): boolean =>
-    interactive && piece.pieceType.startsWith(turnChar);
+    interactive && !pendingFen && piece.pieceType.startsWith(turnChar);
 
   const choosePromotion = (piece: "q" | "r" | "b" | "n") => {
-    if (!promotion) return;
+    if (!promotion || !chess) return;
+    const candidate = chess
+      .moves({ square: promotion.from, verbose: true })
+      .find((m) => m.to === promotion.to && m.promotion === piece);
     const uci = `${promotion.from}${promotion.to}${piece}`;
     setPromotion(null);
-    void onMove(uci);
+    if (candidate) send(uci, candidate.after);
+    else void onMove(uci);
   };
 
+  const shownFen = pendingFen ?? fen;
+  const gridLabel = `Tabuleiro, ${state.status === "active" ? `vez das ${COLOR_LABEL[state.turn]}` : "partida parada"}`;
+
   return (
-    <div className={`board-wrap${isPreview ? " board-preview" : ""}${interactive ? " board-live" : ""}`}>
+    <div
+      ref={wrapRef}
+      className={`board-wrap${isPreview ? " board-preview" : ""}${interactive ? " board-live" : ""}`}
+    >
       <Chessboard
-        key={resetKey}
         options={{
           id: "main-board",
-          position: fen,
+          position: shownFen,
           boardOrientation: orientation,
-          animationDurationInMs: 200,
-          allowDragging: interactive,
+          animationDurationInMs: reducedMotion ? 0 : 180,
+          allowDragging: interactive && !pendingFen,
           canDragPiece,
           onPieceDrop,
           onSquareClick,
           squareStyles,
           arrows,
+          // O halo das setas (§2.5) é feito em CSS (`.board-wrap svg`), porque
+          // `arrowOptions` exige o objeto inteiro de opções da lib.
           allowDrawingArrows: true,
-          showNotation: true,
-          darkSquareStyle: { backgroundColor: "#7a94a8" },
-          lightSquareStyle: { backgroundColor: "#dfe6ec" },
-          darkSquareNotationStyle: { color: "#dfe6ec", fontSize: "11px", fontWeight: 600 },
-          lightSquareNotationStyle: { color: "#5f7a90", fontSize: "11px", fontWeight: 600 },
-          dropSquareStyle: { boxShadow: "inset 0 0 0 3px rgba(63,167,255,0.9)" },
+          // Coordenadas vivem fora das casas, no `BoardFrame` (docs/10 §2.5).
+          showNotation: false,
+          darkSquareStyle: { backgroundColor: "var(--sq-dark)" },
+          lightSquareStyle: { backgroundColor: "var(--sq-light)" },
+          dropSquareStyle: { boxShadow: "inset 0 0 0 3px var(--ink)" },
           boardStyle: {
             display: "grid",
             gridTemplateColumns: "repeat(8, 1fr)",
@@ -216,33 +312,52 @@ export function Board({
             width: "100%",
             height: "100%",
             position: "relative",
-            borderRadius: "6px",
-            boxShadow: "0 10px 30px rgba(0,0,0,0.45)",
+            borderRadius: "var(--r-sm)",
+            // Em revisão o tabuleiro perde a sombra: sinal de "isto é uma cópia".
+            boxShadow: isPreview ? "none" : "var(--shadow-board)",
           },
         }}
       />
-      {promotion && (
-        <div className="promotion" role="dialog" aria-label="Escolha a peça de promoção">
-          <p>Promover para:</p>
-          <div className="promotion-options">
-            {PROMOTION_PIECES.map((opt) => (
-              <button
-                key={opt.piece}
-                type="button"
-                className="btn promotion-btn"
-                onClick={() => choosePromotion(opt.piece)}
-                aria-label={opt.label}
-                title={opt.label}
-              >
-                <span aria-hidden="true">{opt.glyph[turnColor]}</span>
-              </button>
-            ))}
-          </div>
-          <button type="button" className="btn btn-small" onClick={() => setPromotion(null)}>
-            Cancelar
-          </button>
+
+      <BoardKeyboard
+        chess={chess}
+        orientation={orientation}
+        interactive={interactive && !pendingFen}
+        selected={selected}
+        onSelect={setSelected}
+        onMove={attemptMove}
+        legalTargets={legalTargets.map((m) => m.to)}
+        lastMove={lastMove}
+        checkSquare={kingInCheck}
+        label={gridLabel}
+      />
+
+      <dialog
+        ref={promoDialog}
+        className="promotion"
+        aria-label="Escolha a peça de promoção"
+        onClose={() => setPromotion(null)}
+      >
+        <p>Promover para:</p>
+        <div className="promotion-options">
+          {PROMOTION_PIECES.map((opt, index) => (
+            <button
+              key={opt.piece}
+              type="button"
+              className="btn promotion-btn"
+              onClick={() => choosePromotion(opt.piece)}
+              aria-label={opt.label}
+              title={opt.label}
+              autoFocus={index === 0}
+            >
+              <Figurine piece={opt.key} side={turnColor === "white" ? "w" : "b"} />
+            </button>
+          ))}
         </div>
-      )}
+        <button type="button" className="btn btn-small" onClick={() => promoDialog.current?.close()}>
+          Cancelar
+        </button>
+      </dialog>
     </div>
   );
 }

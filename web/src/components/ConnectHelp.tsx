@@ -4,9 +4,11 @@ import { CopyButton } from "./CopyButton";
 interface ConnectHelpProps {
   mcpUrl: string;
   onClose: () => void;
+  /** Abre a tela de provedores; ausente quando o servidor não tem bots (docs/09 §4.3). */
+  onOpenProviders?: () => void;
 }
 
-export function ConnectHelp({ mcpUrl, onClose }: ConnectHelpProps) {
+export function ConnectHelp({ mcpUrl, onClose, onOpenProviders }: ConnectHelpProps) {
   const claudeCode = `claude mcp add --transport http xadrez ${mcpUrl}`;
   const claudeDesktop = JSON.stringify(
     {
@@ -55,6 +57,21 @@ export function ConnectHelp({ mcpUrl, onClose }: ConnectHelpProps) {
         </p>
         <Snippet code={generic} />
       </section>
+
+      {onOpenProviders && (
+        <section className="help-section">
+          <h3>Ou deixe o servidor jogar</h3>
+          <p>
+            Em vez de conectar um cliente, o próprio servidor pode falar com um provedor de LLM (OpenRouter, Ollama,
+            LM Studio, Anthropic…) e ocupar o assento como <strong>bot</strong>. A chave de API fica no{" "}
+            <code>.env</code> do servidor e nunca passa por esta tela.{" "}
+            <button type="button" className="link" onClick={onOpenProviders}>
+              Configurar provedores
+            </button>
+            .
+          </p>
+        </section>
+      )}
 
       <section className="help-section">
         <h3>Duas IAs na mesma partida</h3>

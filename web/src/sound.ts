@@ -7,7 +7,12 @@ import { useSyncExternalStore } from "react";
 
 const STORAGE_KEY = "llm-xadrez.sound";
 
-export type SoundKind = "move" | "capture" | "check" | "end";
+/**
+ * `comment` e `join` nasceram na Fase 4 (docs/10 §4): o "tique" de comentário
+ * novo e o "entrou" de assento ocupado. Os dois são discretos de propósito —
+ * numa partida IA vs IA eles tocam muitas vezes.
+ */
+export type SoundKind = "move" | "capture" | "check" | "end" | "comment" | "join";
 
 let context: AudioContext | null = null;
 let unlocked = false;
@@ -124,6 +129,17 @@ export function playSound(kind: SoundKind): void {
         { frequencyFrom: 523.25, duration: 0.7, type: "sine", gain: 0.18 },
         { frequencyFrom: 659.25, duration: 0.7, delay: 0.05, type: "sine", gain: 0.16 },
         { frequencyFrom: 783.99, duration: 0.8, delay: 0.1, type: "sine", gain: 0.16 },
+      ]);
+      break;
+    // "tique" de comentário novo: curto e baixo, para não competir com o lance.
+    case "comment":
+      playTones([{ frequencyFrom: 1320, frequencyTo: 990, duration: 0.045, type: "sine", gain: 0.12 }]);
+      break;
+    // "entrou": dois tons subindo, o oposto do som de saída.
+    case "join":
+      playTones([
+        { frequencyFrom: 392, duration: 0.09, type: "triangle", gain: 0.16 },
+        { frequencyFrom: 587.33, duration: 0.12, delay: 0.08, type: "triangle", gain: 0.16 },
       ]);
       break;
   }
