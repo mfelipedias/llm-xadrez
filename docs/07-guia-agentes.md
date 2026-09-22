@@ -1,7 +1,11 @@
 # 07 — Guia para os agentes de implementação
 
 Leia, nesta ordem: `00-visao`, `01-arquitetura`, `02-contrato-mcp`, e o doc da sua área
-(`03-servidor` ou `04-frontend`). O contrato de tipos está em `shared/types.ts` — **não
+(`03-servidor` ou `04-frontend`). Se o trabalho toca bots ou provedores, leia também o
+plano [`09`](09-plano-provedores-gateway.md); se toca a interface, o [`10`](10-plano-redesign-ux.md)
+e o [`12`](12-teclado.md). Os dois planos já foram implementados e as divergências entre o
+texto e o código estão marcadas neles com "Corrigido na Fase G" — leia essas notas antes de
+tomar o plano ao pé da letra. O contrato de tipos está em `shared/types.ts` — **não
 altere os tipos** sem atualizar os docs e avisar no relatório final; se precisar de um campo
 novo, adicione-o como opcional.
 
@@ -15,8 +19,11 @@ novo, adicione-o como opcional.
   real — se adicionar, registrar no relatório.
 - Comentários e strings da UI/LLM em pt-BR; identificadores em inglês.
 - Nada de `console.log` espalhado: servidor usa um `log.ts` mínimo com prefixo `[mcp]`,
-  `[api]`, `[ws]`, `[store]`.
+  `[api]`, `[ws]`, `[store]`, `[bot]`, `[providers]`. Toda linha passa por `redact()`.
 - Windows: caminhos com `path.join`, `fs` com `utf8`; nada de comandos shell no código.
+- **Nunca** aceite, devolva, logue ou serialize uma chave de API. `providers.json` guarda
+  só o nome da variável de ambiente (`apiKeyEnv`); o que sai para a UI é `ProviderPublic`
+  (`hasApiKey` + `apiKeyMasked`). Ver [docs/01 → Segurança](01-arquitetura.md#segurança-escopo-local).
 
 ## Verificação obrigatória antes de reportar
 - Servidor: `npm test` verde, `npx tsc -p server --noEmit` sem erros, `npm run smoke`
@@ -36,6 +43,7 @@ novo, adicione-o como opcional.
 | `npm start` | servidor em produção servindo `web/dist` |
 | `npm test` | vitest (server) |
 | `npm run smoke` | cliente MCP de teste ponta a ponta (2 cenários, termina com `OK`) |
+| `npm run smoke:bot` | bots internos pela REST; sem flag usa o provedor `fake`. `--provider <id>` dá **SKIP** (exit 0) se o provedor não estiver disponível |
 | `npm run play` | "IA de mentira": cliente MCP que joga/comenta na partida atual (ver docs/05) |
 | `npm run typecheck` | `tsc --noEmit` em server e web |
 

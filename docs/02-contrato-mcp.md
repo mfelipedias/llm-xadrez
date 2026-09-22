@@ -21,6 +21,11 @@ Tipos referenciados: `shared/types.ts` (`GameState`, `TurnEvent`, ...).
 - Mensagens do humano pendentes para a cor da sessão são incluídas no texto de **qualquer**
   tool (não só `wait_for_turn`) e marcadas como entregues (`deliveredTo`) nessa resposta.
 - O servidor MCP declara `instructions` (resumo do protocolo de jogo) no `initialize`.
+- Um assento pode ser ocupado por um **bot do servidor** (`SeatKind: "bot"`, docs/09). Do
+  ponto de vista de uma sessão MCP externa, um bot é só "outra LLM": ele entra nas mesmas
+  filas de evento, aparece como oponente no texto de estado ("LLM (bot do servidor)") e o
+  `structuredContent` traz `seats[cor].bot` com provedor, modelo, status e uso. Nada no
+  contrato abaixo muda por causa disso.
 
 ## Ferramentas
 
@@ -55,7 +60,10 @@ Se a sessão chamadora já está sentada e chama `join_game` sem `color` (ou com
 apenas o nome é atualizado; com a outra cor, ela troca de assento (o antigo fica vazio).
 Se os dois assentos estão livres e `color` foi omitido, retorna erro pedindo a cor.
 Se o assento é `human`, `join_game` **converte para mcp** apenas com `force: true`
-(o humano vira espectador). Gera evento `opponent_joined` para o outro assento.
+(o humano vira espectador). Se o assento é de um **bot do servidor**, o mesmo: só com
+`force: true`, e aí o bot é parado — um assento de bot nunca é "retomável" pelo nome,
+porque quem controla o ciclo de vida dele é o `BotManager` (o painel tem "Parar" e
+"Liberar assento"). Gera evento `opponent_joined` para o outro assento.
 
 ### `get_state`
 Sem parâmetros. Retorna o estado atual formatado + JSON. Use quando quiser "olhar o
@@ -239,3 +247,34 @@ Regras do formatador:
 - Comentários anteriores **não** entram no estado (a LLM já os tem no seu contexto); apenas
   os últimos 3 comentários do oponente (modo LLM vs LLM) para dar contexto de conversa.
 - Manter abaixo de ~1.500 tokens mesmo em partidas longas (histórico em SAN é compacto).
+
+## As mesmas tools, por dentro: os bots do servidor
+
+Quando o assento é de um **bot do servidor** (docs/09), não há transporte MCP no meio: o
+`BotPlayer` chama as mesmas funções puras de `server/src/mcp/tools.ts`, com um
+`ToolContext` cuja sessão é sintética (`bot:<cor>:<hex>`). Isso é deliberado — o contrato
+de jogo é um só, e qualquer correção numa tool vale para os dois caminhos.
+
+O que muda é o **conjunto oferecido ao modelo** (`server/src/bots/toolset.ts`):
+
+| Tool | Sessão MCP | Bot do servidor |
+|------|-----------|-----------------|
+| `make_move` | ✓ | ✓ |
+| `comment` | ✓ | ✓ |
+| `highlight` | ✓ | ✓ |
+| `get_state` | ✓ | ✓ |
+| `end_game` | ✓ (`resign`/`draw`/`abort`) | ✓ **sem `abort`** |
+| `wait_for_turn` | ✓ | — o servidor entrega o evento por `store.waitForTurn`, sem o teto de 120 s |
+| `new_game`, `join_game`, `leave_game` | ✓ | — quem senta e levanta o bot é o `BotManager` (`/api/bots/*`) |
+| `takeback` | ✓ | — só o humano desfaz lances |
+
+Numa rodada que **não** é de lance (o aluno mandou uma mensagem, ou a partida acabou), o
+conjunto encolhe para `comment`, `highlight` e `get_state`: o prompt diz explicitamente
+"não é sua vez de jogar".
+
+Os JSON Schemas anunciados ao provedor saem dos **mesmos shapes zod** destas tools, via
+`z.toJSONSchema`, e os argumentos são revalidados com eles antes de executar — um modelo
+não consegue chamar uma tool com argumento fora do contrato, nem chamar uma que não está
+na lista: nos dois casos ele recebe um `tool` result de erro, em português, dizendo o que
+fazer. Prompt, orçamento e política de falha dos bots estão em
+[docs/03 → "Bots do servidor"](03-servidor.md#bots-do-servidor-serversrcbots).

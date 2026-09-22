@@ -117,21 +117,25 @@ O loop do bot gerencia ciclo de vida; a LLM só recebe tools de jogo:
 
 ```
 server/src/
-├── bot/
-│   ├── player.ts        # BotPlayer: sessão sintética, loop, cancelamento, orçamento
-│   ├── manager.ts       # BotManager: um BotPlayer por cor; start/stop; reage a new_game/unseat
-│   ├── prompt.ts        # system prompt (professor/adversário, nível, idioma)
-│   ├── toolset.ts       # tools expostas (nome, descrição, JSON Schema via z.toJSONSchema) e dispatcher → tools.ts
-│   ├── textmode.ts      # parser tolerante "MOVE: … | COMMENT: …" e prompt do modo texto
-│   └── budget.ts        # contagem de tokens/chamadas por partida, limites
-├── providers/
-│   ├── types.ts         # ChatProvider, ChatMessage, ToolSpec, ChatResult, ProviderError
-│   ├── openai-compat.ts # OpenRouter, LiteLLM, Ollama /v1, LM Studio, llama.cpp, vLLM, Jan, custom
-│   ├── anthropic.ts     # Messages API via @anthropic-ai/sdk
-│   ├── registry.ts      # carrega providers.json + .env, resolve chaves, presets
-│   └── fake.ts          # provider determinístico para testes (joga do livro/aleatório)
-└── http/api.ts          # + rotas /api/providers*, POST /api/game com seats
+├── bots/                    # (implementado no plural; era `bot/` no plano)
+│   ├── player.ts            # BotPlayer: sessão sintética, loop, cancelamento, orçamento
+│   ├── manager.ts           # BotManager: um BotPlayer por cor; start/stop; reage a new_game/unseat
+│   ├── prompt.ts            # system prompt (professor/adversário, nível, idioma)
+│   ├── toolset.ts           # tools expostas (nome, descrição, JSON Schema via z.toJSONSchema) e dispatcher → tools.ts
+│   ├── textmode.ts          # parser tolerante "MOVE: … | COMMENT: …" e prompt do modo texto
+│   ├── budget.ts            # contagem de tokens/chamadas por partida, limites
+│   └── providers/           # (implementado aninhado em bots/, não solto em server/src/)
+│       ├── types.ts         # ChatProvider, ChatMessage, ToolSpec, ChatResult, ProviderError
+│       ├── openai-compat.ts # OpenRouter, LiteLLM, Ollama /v1, LM Studio, llama.cpp, vLLM, Jan, custom
+│       ├── anthropic.ts     # Messages API via @anthropic-ai/sdk (import dinâmico)
+│       ├── registry.ts      # carrega providers.json + .env, resolve chaves, presets
+│       └── fake.ts          # provider determinístico para testes (joga do livro/aleatório)
+└── http/api.ts              # + rotas /api/providers*, /api/bots/*, POST /api/game com seats
 ```
+
+*(Corrigido na Fase G: o plano propunha `server/src/bot/` e `server/src/providers/`; a
+implementação usa `server/src/bots/` e `server/src/bots/providers/`, para manter tudo que
+é "bot" debaixo de uma pasta só.)*
 
 ## 2. Camada de provedores
 
@@ -200,10 +204,15 @@ Diferenças conhecidas, tratadas por **flags na config do provedor** (não por d
 | `toolChoice` | `true` | `false` no Ollama (não suporta `tool_choice`) |
 | `parallelToolCalls` | `false` | mandamos `parallel_tool_calls: false` onde aceito (OpenRouter); ignorado nos locais |
 | `extraHeaders` | `{}` | OpenRouter: `HTTP-Referer`, `X-Title: "LLM Xadrez"` |
-| `extraBody` | `{}` | OpenRouter: `provider: { sort: "price" }`, `reasoning: { effort: "low" }`; vLLM/llama.cpp: nada |
+| `extraBody` | `{}` | OpenRouter: `usage: { include: true }`, `reasoning: { effort: "low" }`; vLLM/llama.cpp: nada |
 | `toolMode` | `"native"` | `"text"` força modo texto estruturado (seção 2.4); `"auto"` começa nativo e cai para texto se a 1ª resposta não trouxer `tool_calls` |
 | `modelsPath` | `/models` | OpenRouter aceita `?supported_parameters=tools`; Ollama pode complementar com `/api/tags` |
 | `timeoutMs` | `60000` (cloud) / `180000` (local) | modelos locais em CPU demoram |
+
+*(Corrigido na Fase G: o `extraBody` do preset OpenRouter ficou `usage: { include: true }`
+— que faz o gateway devolver o custo em dólares no `usage`, alimentando o orçamento — em
+vez de `provider: { sort: "price" }`, que escolheria a rota mais barata mas esconderia o
+preço. O `modelsQuery` saiu como campo próprio, separado de `modelsPath`.)*
 
 Detalhes de implementação:
 - `function.arguments` chega como **string JSON**; parse tolerante (aceitar objeto já
@@ -424,7 +433,9 @@ bot pode chamar `end_game(how: "draw")`.
 - **`.env`** (gitignored): `OPENROUTER_API_KEY=…`, `ANTHROPIC_API_KEY=…`,
   `LITELLM_API_KEY=…`. Docker: passam pelo `docker-compose.yml` como hoje `MCP_TOKEN`.
 - Variáveis novas em `config.ts`: `PROVIDERS_FILE` (default `./providers.json`),
-  `BOT_AUTORESUME` (default `true`), `BOT_DEFAULT_PROFILE` (id do perfil sugerido na UI).
+  `BOT_AUTORESUME` (default `true`), `BOT_DEFAULT_PROFILE` (id do perfil sugerido na UI) e
+  — acrescentada na Fase C — `BOT_FAKE_PROVIDER` (`1` injeta o provedor determinístico
+  `fake`/`fake-1` no registry, para `npm run smoke:bot` rodar sem rede e sem custo).
 - Presets embutidos (`registry.ts`, usados quando `providers.json` não existe e para o
   botão "adicionar preset" na UI):
 
@@ -447,6 +458,16 @@ level, temperature, toolMode?, historyTurns, limits }`. A UI escolhe um perfil p
 assento; perfis rápidos podem ser criados inline no diálogo ("provedor + modelo").
 
 ### 4.3 UI
+
+> **Corrigido na Fase G (2026-09-22).** Esta seção foi escrita antes do
+> [plano 10](10-plano-redesign-ux.md), que reconstruiu a interface. Três componentes
+> citados aqui **não existem mais**: `Seats` virou `SeatPlate`, `StatusBar` foi dissolvido
+> (vez/xeque na placa, fim de partida no `GameBanner`, anúncios em `LiveRegions`) e
+> `LessonFeed` virou `Notebook` + `Annotation`. E **o editor de perfis não saiu**: a tela
+> "Provedores" **lista** perfis em leitura; criar ou mudar um perfil é editar o
+> `providers.json`, ou escolher `providerId` + `model` direto no diálogo de nova partida
+> (ver a correção em §5.3). A lista abaixo fica como registro do que foi pedido; o
+> parágrafo "Onde isso foi parar" diz onde cada item aterrissou.
 
 - **Diálogo "Nova partida"** (`NewGameDialog.tsx`): em vez dos 4 modos fixos, cada assento
   (Brancas / Pretas) tem um seletor `Humano | Aguardar MCP | Bot` e, se Bot, um segundo
@@ -471,6 +492,27 @@ assento; perfis rápidos podem ser criados inline no diálogo ("provedor + model
 - **`LessonFeed.tsx`**: avatar para `bot`; comentários de sistema de erro/orçamento com
   ícone ⚠️.
 - **`ConnectHelp.tsx`**: seção "ou deixe o servidor jogar: configure um provedor".
+
+**Onde isso foi parar (implementado na Fase E, sobre o visual do plano 10):**
+
+| Pedido acima | Onde ficou |
+|---|---|
+| Diálogo "Nova partida" com seletor por assento | `NewGameDialog.tsx` + `BotPicker.tsx`, com os 4 atalhos no topo e o aviso de custo (US$ 1,00 / 400k tokens por partida) |
+| Tela "Provedores" | `ProvidersDialog.tsx`, aberta pelo botão **Provedores** no header (só aparece quando o servidor expõe a camada, i.e. `server.providers !== undefined`) e por um link no `ConnectHelp` |
+| Editor de perfis de bot | **não existe.** A tela lista perfis em leitura e diz isso na própria tela |
+| `Seats.tsx` com estado/tokens/custo e botões | `SeatPlate.tsx`: provedor/modelo, status do loop, tokens e custo estimado, e o menu "⋯" com **Parar / Retomar · Trocar de modelo · Liberar assento** (`popover` nativo) |
+| "Trocar modelo" | `ChangeBotDialog.tsx` → `POST /api/bots/:color/resume` com `{ profileId }` ou `{ providerId, model }` |
+| `StatusBar.tsx` "está pensando… 8 s" | `SeatPlate` (contador a partir de `bot.thinkingSince`); o erro curto aparece na placa **e** num toast persistente com ação "Retomar" |
+| `MessageBox.tsx` com destino `bot` | feito: `isAiSeat()` trata `mcp` e `bot` igual |
+| `LessonFeed.tsx` com avatar de bot e ⚠️ de sistema | `Notebook`/`Annotation`: comentários de sistema de erro e de orçamento entram com a categoria `warning` |
+| `ConnectHelp.tsx` "ou deixe o servidor jogar" | feito: botão que abre a tela "Provedores" |
+
+Capturas: [`ui-bot.png`](img/ui-bot.png) (humano vs bot em andamento),
+[`ui-bot-nova-partida.png`](img/ui-bot-nova-partida.png),
+[`ui-bot-provedores.png`](img/ui-bot-provedores.png),
+[`ui-bot-menu.png`](img/ui-bot-menu.png),
+[`ui-bot-trocar-modelo.png`](img/ui-bot-trocar-modelo.png) e
+[`ui-bot-erro.png`](img/ui-bot-erro.png) (toast persistente com "Retomar").
 
 ## 5. API e tipos
 
@@ -568,7 +610,6 @@ Mudanças pequenas e localizadas:
 | DELETE | `/api/providers/:id` | remove (recusa se um bot ativo usa) |
 | POST | `/api/providers/:id/test` | `{ ok, latencyMs, models }` ou `{ ok: false, error }` (erro sem corpo bruto) |
 | GET | `/api/providers/:id/models` | `ModelInfo[]` (cache 5 min; `?refresh=1`) |
-| PUT/POST/DELETE | `/api/profiles[/:id]` | CRUD de `BotProfile` |
 | POST | `/api/game` | aceita `seats` (5.1); cria bots via manager; resposta `GameState` |
 | POST | `/api/bots/:color/stop` | para o bot (assento fica `bot` com `status: "stopped"`) |
 | POST | `/api/bots/:color/resume` | retoma (zera erro; opcional `{ profileId }` para trocar modelo) |
@@ -578,12 +619,40 @@ Mudanças pequenas e localizadas:
 Erros: `409` se o assento está ocupado por humano/MCP ativo, `400` provedor sem chave
 (`"Provedor openrouter sem OPENROUTER_API_KEY no .env"`), `502` erro do provedor no teste.
 
+> **Corrigido na Fase G (2026-09-22): não existe CRUD de perfis de bot.** A linha
+> `PUT/POST/DELETE /api/profiles[/:id]` estava nesta tabela e **nunca foi implementada** —
+> nem na Fase C, nem depois. Hoje há dois caminhos para escolher o modelo de um bot:
+>
+> 1. **`providerId` + `model` direto**, em `POST /api/game` (dentro de `seats`) ou em
+>    `POST /api/bots/:color/{sit,resume}`. É o que a UI faz pelo `BotPicker`;
+> 2. **editar `providers.json` à mão**, que é onde os perfis (com papel, nível, temperatura
+>    e limites) vivem. O servidor relê o arquivo ao subir.
+>
+> A UI **lista** perfis em leitura (`GET /api/providers` devolve `profiles`) e diz na tela
+> que a edição é no arquivo. O `scripts/bot-smoke.ts` grava um `providers.json` temporário
+> justamente porque não há rota para criar um perfil com limites apertados.
+>
+> Duas rotas administrativas que a tabela também não previa e **existem**:
+> `POST /api/providers/preset` (adiciona um preset embutido) e o par
+> `PUT`/`DELETE /api/providers/:id`, todas protegidas por `canAdmin()`: só de `localhost`
+> ou, se `MCP_TOKEN` estiver definido, com `Authorization: Bearer <token>`.
+>
+> Se o CRUD de perfis voltar à mesa, ele entra no [roadmap](06-roadmap.md) — não aqui.
+
 ### 5.4 WebSocket
 
 - `{ type: "bot", color, bot }` a cada mudança de `seat.bot` (throttle 250 ms para
   tokens; imediato para mudança de `status`).
 - `{ type: "server", server }` inclui `providers` (públicos) para a UI não precisar de
   fetch inicial.
+
+*(Corrigido na Fase G: **não há throttle de 250 ms**. `ws.ts` emite `{ type: "bot" }`
+imediatamente a cada `store.updateBot()`, e é o `BotPlayer` que evita o barulho: o
+`setStatus()` só chama `updateBot` quando status, texto ou uso realmente mudaram. Como o
+uso só é contabilizado uma vez por chamada ao provedor — não há streaming na v1 —, a
+frequência já é de poucas mensagens por lance. O `{ type: "server" }` esse sim continua com
+throttle de 500 ms, como antes do plano 09, e passou a incluir `providers`, `profiles` e
+`bots`.)*
 
 ## 6. Segurança e privacidade
 
@@ -597,6 +666,10 @@ Erros: `409` se o assento está ocupado por humano/MCP ativo, `400` provedor sem
 - **Persistência**: `current-game.json` guarda `seat.bot` (providerId/model/usage) mas
   nunca chaves; PGN ganha header `White/Black` = nome do bot e `WhiteType/BlackType`
   = `"program"` (padrão PGN) + `Annotator`.
+  *(Corrigido na Fase G: os headers `WhiteType`/`BlackType`/`Annotator` **não foram
+  implementados**. O PGN sai com `Event`, `Site`, `Date`, `Round`, `White`, `Black` e
+  `Result`, e o nome do bot entra em `White`/`Black` como o de qualquer jogador. O resto
+  vale: `current-game.json` guarda `seat.bot` sem nenhuma chave.)*
 - **Rede**: bots só falam com `baseUrl` da config; UI não pode apontar para URL arbitrária
   sem passar pela tela de provedores (que só funciona em localhost — `PUT /api/providers`
   recusa se `req.ip` não é loopback **ou** se `MCP_TOKEN` está definido e o header não
@@ -677,6 +750,14 @@ Esforço relativo: **P** (≤ meio dia), **M** (1–2 dias), **G** (3+ dias).
 - **Aceite**: `npm run build`; Playwright: criar partida humano vs bot (fake), ver
   "pensando…" → lance + comentário no feed; tela de provedores testa conexão e lista
   modelos (contra `fake`); screenshot `docs/img/ui-bot.png`.
+- **Como saiu:** a Fase E foi para depois da Fase 2 do plano 10, para nascer no visual
+  novo — `SeatPlate` e `ChangeBotDialog` no lugar de `Seats`/`StatusBar` (ver §4.3), e os
+  fixtures viraram dois cenários próprios, `?mock=bots` e `?mock=botsvsbots`. A partida
+  humano vs bot foi criada pela UI contra o servidor real com `BOT_FAKE_PROVIDER=1`.
+  **O contador "pensando há N s" só é observável com um provedor de latência real** — o
+  `fake` responde em ~1 ms, então a captura dele veio de fixture. As capturas de IA vs IA
+  também vieram de `?mock=botsvsbots`: a sessão real com dois bots `fake` funciona, mas
+  acaba em ~6 s (32 lances, empate por repetição).
 
 ### Fase F — Anthropic + smoke real (P–M)
 - `providers/anthropic.ts` com `@anthropic-ai/sdk` (dependência nova; import dinâmico),
@@ -690,10 +771,34 @@ Esforço relativo: **P** (≤ meio dia), **M** (1–2 dias), **G** (3+ dias).
 - **Aceite**: adaptador Anthropic com SDK mockado (tool_use → tool_result numa única
   mensagem user); smoke real "SKIP" ou "OK".
 
+> **O que de fato foi verificado na Fase F (2026-09-22).** O adaptador Anthropic foi
+> validado contra o **SDK mockado** (17 testes) e contra um **mock local da Messages API**,
+> conferindo no fio: `cache_control` no `system`, `thinking: adaptive`, `effort: low`,
+> `tool_choice: "auto"`, ausência de `temperature` e `tool_result` + estado numa única
+> mensagem `user`. **Nada foi executado contra `api.anthropic.com`**, nem contra OpenRouter,
+> LM Studio, Ollama ou qualquer outro provedor real: não há `.env` com chave nesta máquina
+> e nenhum servidor local no ar, então as 4 variantes do smoke real dão **SKIP** (exit 0),
+> que é o resultado correto. Um teste com chave real continua pendente.
+>
+> Duas descobertas que teriam quebrado em produção e entraram no adaptador:
+> `temperature` devolve **400** nos modelos 4.7+/5 (o `BotPlayer` manda `temperature: 0` na
+> última iteração da rodada), e `thinking`/`output_config` precisam ser filtrados por
+> modelo. O `estimatedCostUsd` da Messages API é **estimado** por uma tabela local de
+> preços — a API não devolve custo —, então envelhece se os preços mudarem. E o
+> `cache_control` pode simplesmente não cachear: o prefixo mínimo cacheável é de 512–4096
+> tokens conforme o modelo e o prompt de sistema tem ~800 — sem erro, só sem cache.
+> Confira em `cachedInputTokens` depois de alguns lances.
+
 ### Fase G — Polimento (P)
 - Docs: atualizar `02`, `03`, `04`, `05` (seção "ou use um bot"), `08` (variáveis no
   compose), README. `providers.json` de exemplo commitado; `.env.example` com as chaves
   vazias. Roadmap: streaming de texto, `analyze` para o bot, torneio bot vs bot.
+- **Feito em 2026-09-22.** Além da lista acima: `01-arquitetura` e `00-visao` ganharam o
+  terceiro tipo de assento, e as divergências entre este plano e o código foram corrigidas
+  no próprio texto (marcadas com "Corrigido na Fase G"): §1.3 (pastas), §2.2 (`extraBody`
+  do OpenRouter), §4.1 (`BOT_FAKE_PROVIDER`), §4.3 (componentes de UI e ausência do editor
+  de perfis), §5.3 (**não existe CRUD de perfis**), §5.4 (sem throttle no evento `bot`) e
+  §6 (sem os headers `WhiteType`/`BlackType`/`Annotator` no PGN).
 
 Ordem: A → B → C → D → E → F → G. B e A são independentes (paralelizáveis); D depende de C;
 E pode começar após A com fixtures. Total estimado: ~2 semanas de trabalho de um agente
@@ -863,3 +968,24 @@ Também a confirmar: (a) o `providers.json` fica commitado com presets (sem chav
 pode gravá-lo; (b) `BOT_AUTORESUME=true` recria bots ao reiniciar o servidor; (c) modelos
 sugeridos nos presets (slugs do OpenRouter devem ser conferidos em `/models` na
 implementação).
+
+---
+
+## 11. Status das decisões (aprovadas em 2026-09-22)
+
+Todas as decisões da seção 10 foram **aprovadas como escritas**, sem alterações:
+
+1. ✅ `SeatKind = "bot"` novo (não reaproveitar `"mcp"`).
+2. ✅ Bot chama `tools.ts` diretamente com `ToolContext` + sessão sintética; espera via
+   `store.waitForTurn`.
+3. ✅ `fetch` nativo para o adaptador OpenAI-compatível + `@anthropic-ai/sdk` (import
+   dinâmico) para a Anthropic.
+4. ✅ Sem streaming na v1; `historyTurns` = 4 por padrão.
+5. ✅ Falha: `pause` em humano vs bot, `random_legal` em bot vs bot; `maxUsdPerGame` = 1.00,
+   `maxTokensPerGame` = 400k; `takeback` não exposto ao bot.
+
+Itens (a), (b) e (c) também confirmados: `providers.json` commitado com presets sem chaves
+e gravável pela UI; `BOT_AUTORESUME=true`; slugs dos presets a conferir em `/models` durante
+a implementação.
+
+Execução acompanhada em [`11-execucao.md`](11-execucao.md).

@@ -1,58 +1,123 @@
-# 06 — Roadmap e divisão de trabalho
+# 06 — Roadmap
 
-## Fase 1 — MVP jogável (esta rodada)
+Estado em **2026-09-22**. O histórico de execução por onda/agente está em
+[docs/11](11-execucao.md); aqui fica o que já existe e o que vem depois.
 
-Executada por três agentes; A e B em paralelo, C depois.
+---
 
-### Agente A — Servidor (`server/`, `scripts/mcp-smoke.ts`, testes)
-1. `config.ts`, `game/rules.ts`, `game/store.ts`, `game/format.ts`, `game/persist.ts`.
-2. `http/api.ts`, `http/ws.ts`.
-3. `mcp/transport.ts`, `mcp/server.ts`, `mcp/tools.ts`, `mcp/prompts.ts`.
-4. `index.ts` (bootstrap + static + logs de conexão).
-5. Testes vitest (docs/03) — `npm test` verde.
-6. `scripts/mcp-smoke.ts`: cliente MCP real (`StreamableHTTPClientTransport` do SDK) que:
-   inicializa, lista tools, `new_game(my_color: black)`, humano joga `e4` via REST, LLM
-   recebe `opponent_moved` em `wait_for_turn`, joga `e5` com comentário, `comment`,
-   `highlight`, lance ilegal (espera `isError`), `takeback`, e por fim um Mate do Pastor
-   completo; imprime cada resposta. `npm run smoke` deve terminar com "OK".
-7. Também testar o cenário LLM vs LLM no smoke: duas sessões MCP, `new_game(opponent: llm)`
-   + `join_game`, 4 lances alternados.
+## ✅ Fase 1 — MVP jogável (entregue)
 
-### Agente B — Frontend (`web/`)
-1. `index.html`, `main.tsx`, `App.tsx`, `api.ts` (`useGameSocket`, chamadas REST).
-2. Componentes de docs/04. Verificar a API exata do `react-chessboard` instalado.
-3. `styles.css` responsivo, tema escuro, tipografia legível.
-4. Estado de desenvolvimento sem servidor: `web/src/dev/fixtures.ts` com um `GameState`
-   de meio-jogo (com comentários, destaques, mensagens) e `?mock=1` na URL para rodar a UI
-   com esse fixture e sem WebSocket (útil para desenvolver e para screenshots).
-5. `npm run build` (typecheck + vite build) sem erros.
+Tabuleiro web + servidor MCP: `GameStore` como fonte única de verdade, 10 tools,
+prompt `chess_teacher`, 3 recursos, REST + WebSocket para o navegador, persistência e PGN.
+Validada de ponta a ponta com cliente MCP real (`npm run smoke`, `npm run play`) e com a UI
+no Chromium. Detalhes do que foi verificado: [README](../README.md#validado).
 
-### Agente C — Integração e validação (depois de A e B)
-1. `npm install`, `npm test`, `npm run build`, `npm start`.
-2. `npm run smoke` contra o servidor rodando.
-3. Abrir a UI com Playwright/Chrome: nova partida humano brancas, jogar `e4` arrastando ou
-   via clique, conferir que o feed mostra o lance; rodar o smoke em paralelo e conferir que
-   o lance/comentário/seta da "IA" aparece; screenshot em `docs/img/ui.png`.
-4. Corrigir bugs encontrados (em qualquer pasta), rodar tudo de novo.
-5. Conferir `.mcp.json` com Claude Code: `claude mcp list` mostra `xadrez` conectado.
-6. Atualizar README com o que foi validado.
+## ✅ Fase 2 — Bots via provedores (entregue)
 
-## Fase 2 — Qualidade de aula
-- Navegação por variantes: a LLM propõe "e se você tivesse jogado X?" via `show_line`
+Plano: [docs/09](09-plano-provedores-gateway.md). O servidor passou a saber ocupar um
+assento sozinho, falando com um provedor de LLM — sem cliente de chat no meio.
+
+- `SeatKind` ganhou `"bot"`; o bot é um ocupante como outro qualquer, com sessão sintética,
+  fila de eventos e `store.waitForTurn`.
+- Camada de provedores: um adaptador OpenAI-compatível com `fetch` nativo (OpenRouter,
+  Ollama, LM Studio, LiteLLM, vLLM, llama.cpp, Jan, custom) e um adaptador Anthropic com
+  `@anthropic-ai/sdk` por import dinâmico.
+- Dois modos de falar com o modelo: tool calling nativo e **texto estruturado**, para
+  modelos pequenos; `"auto"` decide na primeira rodada.
+- Orçamento por partida (US$ 1,00 / 400k tokens, ajustável por perfil), política de falha
+  (`pause` contra humano, `random_legal` contra bot), backoff em 429/5xx.
+- UI: seletor por assento em "Nova partida", tela "Provedores", placa de assento com
+  status/uso e menu "⋯", `npm run smoke:bot`.
+
+**Pendente desta fase:** nada foi executado contra um provedor pago ou local **real** — só
+mocks e o provedor `fake` (ver [docs/05](05-conectar-clientes.md#ou-use-um-bot-do-servidor)).
+O primeiro teste com chave de verdade é o próximo passo natural.
+
+## ✅ Fase 3 — Redesign de UX (entregue)
+
+Plano: [docs/10](10-plano-redesign-ux.md). A interface foi reconstruída em cima de tokens
+semânticos.
+
+- Tema claro/escuro seguindo o sistema, Literata auto-hospedada, presets de casas.
+- Mesa: placas de assento acima e abaixo do tabuleiro, moldura com coordenadas fora,
+  régua de lances sob o tabuleiro, banner de fim de partida.
+- Caderno com abas Aula/Lances/Ações e o campo de mensagem colado ao pé.
+- Onboarding guiado "zero → IA conectada" em quatro passos com detecção automática.
+- `<dialog>` e `popover` nativos; toasts acessíveis; modo revisão; modo espectador.
+- **Tabuleiro jogável só com o teclado** ([docs/12](12-teclado.md)), regiões `aria-live`
+  fixas, notação com figurinhas SVG.
+
+**Medição real:** axe-core 4.x via Playwright, 0 violações em 17 cenários, mais contraste,
+alvos e reflow por `getComputedStyle`. **O Lighthouse nunca rodou** nesta máquina — nenhum
+doc do projeto afirma nota dele.
+
+**Pendente desta fase:** o fluxo "zero → IA conectada" nunca foi testado com um cliente MCP
+no ar (o servidor `xadrez` do `.mcp.json` está com `ConnectionRefused` aqui), e os anúncios
+de leitor de tela foram conferidos pelo conteúdo das regiões `aria-live`, não com NVDA ou
+VoiceOver de verdade.
+
+---
+
+## Fase 4 — Fechar o que ficou aberto
+
+Itens pequenos, herdados das duas fases acima. Ordem sugerida.
+
+1. **Primeiro jogo contra um provedor real.** `npm run smoke:bot -- --provider anthropic`
+   (ou `openrouter`, ou um local no ar) com chave de verdade, anotando o que quebrar.
+   Conferir de quebra se o `cache_control` está mesmo cacheando (`usage.cachedInputTokens`
+   depois de alguns lances) — o prompt de sistema tem ~800 tokens e o prefixo mínimo
+   cacheável vai de 512 a 4096 conforme o modelo.
+2. **"Zero → IA conectada" com Claude Code no ar**, cronometrado, fechando o critério de
+   aceite da Fase 2 do plano 10.
+3. **Leitor de tela de verdade** (NVDA no Windows, VoiceOver no macOS) no roteiro de
+   [docs/12](12-teclado.md).
+4. **Tabela de preços do adaptador Anthropic**: hoje o `estimatedCostUsd` sai de uma tabela
+   local, que envelhece. Decidir entre atualizá-la a cada release ou marcar o número como
+   aproximado na UI.
+
+## Fase 5 — Aula mais rica
+
+- **Streaming do texto do assistant** para os bots: hoje o comentário só aparece quando a
+  tool é executada, e a espera é um "pensando há N s". Com streaming, o texto parcial
+  apareceria como "digitando…" no caderno. Exige um canal WS a mais e um acumulador de
+  delta que aguente provedores locais heterogêneos — por isso ficou fora da v1
+  ([docs/09 §3.7](09-plano-provedores-gateway.md#37-streaming)).
+- **Navegação por variantes**: a IA propõe "e se você tivesse jogado X?" via `show_line`
   (sequência de lances numa cópia da posição, exibida como variante sem alterar a partida).
-- Histórico de partidas na UI (`/api/games`), reabrir PGN antigo em modo revisão.
-- Relógio opcional (só informativo) e contagem de tempo de reflexão de cada lado.
-- Perfil do aluno persistido (nível, aberturas preferidas) exposto como recurso MCP para a
-  LLM personalizar as aulas.
-- i18n completo (en).
+- **Histórico de partidas na UI**: `/api/games` e `/api/games/:id/pgn` já existem no
+  servidor; falta a tela e o modo "reabrir PGN antigo em revisão".
+- **Relógio opcional** (informativo) e tempo de reflexão de cada lado — com bots, o tempo
+  por lance é dado interessante por si só.
+- **Perfil do aluno** persistido (nível, aberturas preferidas) exposto como recurso MCP e
+  injetado no prompt dos bots, para a aula não recomeçar do zero a cada partida.
+- **CRUD de perfis de bot** (`/api/profiles`): estava no plano 09 §5.3 e não foi feito; hoje
+  perfis se editam no `providers.json`. Só vale a pena com um editor decente na tela
+  "Provedores".
+- **i18n completo (en)**: o servidor já formata o estado em `en` por `LANG`; a UI e os
+  prompts dos bots continuam só em pt-BR.
 
-## Fase 3 — Motor
-- `analyze` tool com Stockfish (WASM ou binário local): avaliação, melhor lance, erros
-  (blunder/mistake/inaccuracy) por lance. A LLM usa isso para comentar com precisão.
-- Modo "revisão pós-jogo": a LLM percorre a partida com a análise e explica os momentos-chave.
-- Barra de avaliação na UI (opcional, pode ser escondida para não dar spoiler).
+## Fase 6 — Motor
 
-## Fase 4 — Extras
-- Puzzles diários (import de PGN/FEN de bases públicas), com a LLM como tutor.
-- Vozes: leitura dos comentários em voz alta (Web Speech API).
-- Modo torneio LLM vs LLM com placar acumulado.
+- **`analyze`**: Stockfish (WASM ou binário local) com avaliação, melhor lance e
+  classificação de erro (blunder/mistake/inaccuracy) por lance.
+- **Disponibilizar `analyze` ao bot**: hoje o conjunto de tools de um bot é
+  `make_move`/`comment`/`highlight`/`get_state`/`end_game`
+  ([docs/02](02-contrato-mcp.md#as-mesmas-tools-por-dentro-os-bots-do-servidor)). Com o
+  motor no ar, `analyze` entra nesse conjunto e o professor passa a comentar com números em
+  vez de intuição. Duas coisas a resolver junto: o custo (cada análise é uma rodada a mais
+  no orçamento) e a tentação de o modelo virar papagaio do motor — o prompt precisa pedir
+  explicação, não avaliação.
+- **Modo "revisão pós-jogo"**: a IA percorre a partida com a análise e explica os
+  momentos-chave.
+- **Barra de avaliação na UI**, escondível para não dar spoiler.
+
+## Fase 7 — Extras
+
+- **Torneio bot vs bot**: hoje dá para sentar dois bots e assistir, mas cada partida é
+  avulsa. Falta o que faz disso um torneio — uma fila de confrontos (modelo A × modelo B,
+  cores alternadas, N partidas), placar acumulado e um resumo por modelo: resultado, lances
+  ilegais tentados, tokens e custo por partida. O orçamento por partida já existe; o que
+  falta é um teto por **torneio** e uma tela de placar. Serve para comparar modelos de
+  verdade, que é a pergunta que todo mundo faz ao ver dois bots jogando.
+- **Puzzles diários** (import de PGN/FEN de bases públicas), com a IA como tutora.
+- **Vozes**: leitura dos comentários em voz alta (Web Speech API).

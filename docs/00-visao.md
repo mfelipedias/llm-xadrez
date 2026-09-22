@@ -29,14 +29,20 @@ Um **tabuleiro web** que funciona como a "memória externa" e as "mãos" da IA:
 
 ## Modos de jogo
 Cada partida tem dois **assentos** (brancas e pretas). Cada assento é ocupado por um
-**humano** (navegador) ou por uma **sessão MCP** (uma LLM conectada). Isso dá três modos
-sem código especial:
+**humano** (navegador), por uma **sessão MCP** (uma LLM conectada pelo chat) ou por um
+**bot do servidor** (o próprio servidor falando com um provedor de LLM — OpenRouter, a API
+da Anthropic, ou um modelo local; ver [docs/09](09-plano-provedores-gateway.md)). Qualquer
+combinação vale, sem código especial:
 
 | Modo | Brancas | Pretas | Quem assiste |
 |------|---------|--------|--------------|
-| Humano vs LLM (principal) | humano ou LLM | LLM ou humano | — |
-| **LLM vs LLM** | LLM A | LLM B | humano no navegador, pode mandar perguntas às duas |
+| Humano vs IA (principal) | humano ou IA | IA ou humano | — |
+| **IA vs IA** | IA A | IA B | humano no navegador, pode mandar perguntas às duas |
 | Humano vs humano | humano | humano | (útil para testar a UI) |
+
+"IA" aqui é indiferente: sessão MCP ou bot do servidor. A diferença é só de onde ela vem —
+pelo chat, ou configurada na própria tela. Um bot aparece para o outro lado como
+"LLM (bot do servidor)" e entra nas mesmas filas de evento.
 
 No modo LLM vs LLM, duas conversas diferentes (ex.: Claude Desktop e Claude Code, ou dois
 chats) conectam no mesmo servidor. A primeira cria a partida e ocupa uma cor; a segunda
@@ -68,6 +74,16 @@ O humano vê as duas comentando, cada uma identificada pelo nome que informou.
 3. A chama `wait_for_turn()` → retorna imediatamente `event: "your_turn"` (oponente sentou).
    A joga; B, que estava em `wait_for_turn()`, recebe `opponent_moved` e joga. E assim por diante.
 4. O humano assiste no navegador; pode enviar mensagem para "todos", "brancas" ou "pretas".
+
+## Fluxo sem nenhum cliente de chat (bot do servidor)
+1. Uma chave no `.env` (`OPENROUTER_API_KEY=…`) ou um modelo local no ar.
+2. No navegador: **Nova partida** → assento das pretas = "Bot do servidor" → perfil ou
+   "provedor + modelo". Se for pago, o diálogo mostra o limite da partida.
+3. O servidor senta no assento, espera a vez, chama o provedor e executa as mesmas
+   ferramentas de uma LLM externa. Na placa do assento você vê o modelo, o status
+   ("pensando há 8 s"), os tokens e o custo estimado, e pode parar, retomar ou trocar de
+   modelo no meio da partida.
+4. Vale a mesma mesa: dá para pôr o Claude Code de brancas e um modelo local de pretas.
 
 ## Princípios de design das ferramentas MCP
 - **Estado sempre junto**: toda ferramenta que muda algo devolve o estado completo.

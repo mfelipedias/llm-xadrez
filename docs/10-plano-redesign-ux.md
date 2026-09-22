@@ -306,6 +306,20 @@ Mesma grade com coluna lateral de 320 px e tabuleiro `min(100% , 100vh - 260px)`
 de lances mostra só os últimos 6 lances com botão "…". Ferramentas do tabuleiro viram um
 menu "⋯" (FEN, PGN, limpar desenho) com "virar" e "voltar lance" visíveis.
 
+> **Corrigido na Fase G.** Duas divergências medidas na implementação:
+> - **A quebra para coluna única é em 900 px, não em 768.** Entre 768 e 900 px as duas
+>   colunas deixariam o tabuleiro com ~400 px, menor do que ele fica em coluna única.
+>   O `isPhone` da UI (abas do Caderno, balão, alvo de 44 px) continua em ≤ 767 px; o que
+>   mudou de 768 para 900 foi só a quebra da grade.
+> - **A régua não corta em 6 lances com "…":** ela rola horizontalmente e se auto-centra no
+>   lance ativo. Decisão mantida: com o corte, rever um lance antigo exigia abrir o "…"
+>   primeiro; rolando, o gesto é o mesmo em qualquer largura.
+>
+> O menu "⋯" saiu como planejado, entre 768 e 1099 px
+> (`(min-width: 768px) and (max-width: 1099px)`), e leva também o seletor de preset de
+> casas: a 1024 px os seis controles mais o `select` quebravam em duas linhas e comiam
+> ~40 px de altura do tabuleiro. Captura: [`f2-tablet-menu.png`](img/redesign/f2-tablet-menu.png).
+
 ### 3.4 Celular (< 768 px)
 
 ```
@@ -334,6 +348,14 @@ menu "⋯" (FEN, PGN, limpar desenho) com "virar" e "voltar lance" visíveis.
 
 - O balão do último comentário resolve o problema central do celular: **ler o comentário
   sem perder o tabuleiro**. Toque expande em folha inferior (bottom sheet) com o feed.
+
+> **Corrigido na Fase G.** O balão **não** tem "ver tudo" nem folha inferior. Ele é
+> `aria-hidden` (o mesmo comentário já está, com autor e categoria, no primeiro item da aba
+> "Aula" logo abaixo — anunciá-lo duas vezes é ruído), e um botão focável dentro de
+> conteúdo `aria-hidden` viola `aria-hidden-focus`. Sem a folha, o caminho para o feed
+> inteiro é a aba "Aula", que fica a um toque de distância e já está na tela. Decisão
+> consciente, não uma folha esquecida. Captura:
+> [`f4-balao-expandido.png`](img/redesign/f4-balao-expandido.png).
 - Abas "Aula / Lances / Ações" abaixo do balão; "Ações" guarda virar, voltar lance, FEN,
   PGN, limpar, empate, desistir, nova partida.
 - Header perde a versão e mantém o ponto de conexão (com `aria-label`).
@@ -531,6 +553,16 @@ Combobox (fase 2 do roadmap, histórico de partidas).
 Tamanhos: P = até meio dia, M = 1–2 dias, G = 3+ dias. Ordem pensada para **nunca quebrar
 o que funciona**: primeiro tokens (só CSS), depois estrutura, depois comportamento.
 
+> **Corrigido na Fase G (2026-09-22).** Os critérios de aceite abaixo diziam "Lighthouse
+> a11y ≥ 90/95". **O Lighthouse nunca rodou**: não há Chrome nem LH CLI nesta máquina, e
+> nenhuma fase produziu nota dele. O que foi medido de verdade, em todas as fases, foi
+> **axe-core 4.x via Playwright** (tags `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`,
+> `wcag22aa`, `best-practice`) mais contraste, alvos de toque e reflow calculados por
+> `getComputedStyle` — o mesmo medidor do diagnóstico §1.7. Resultado da última medição:
+> **0 violações em 17 cenários** (incluindo `<dialog>` e `popover` abertos), 0 contrastes
+> abaixo de AA e 0 alvos fora do mínimo. As linhas de aceite foram reescritas para dizer
+> isso. Nenhum doc deste projeto afirma nota de Lighthouse.
+
 ### Fase 0 — Fundação visual (P) · só `styles.css` + `index.html`
 - Tokens novos (§8.1) em `:root` + `[data-theme="dark"]` + `@media (prefers-color-scheme)`;
   mapear os nomes antigos (`--bg-elev`, `--accent`…) para os novos para nada quebrar.
@@ -539,8 +571,9 @@ o que funciona**: primeiro tokens (só CSS), depois estrutura, depois comportame
   `.feed-human .md`.
 - Corrigir contrastes (`--text-faint`, `btn-primary`, tags) e tamanhos mínimos.
 - `prefers-reduced-motion`; `meta color-scheme: light dark`.
-- Aceite: Lighthouse a11y ≥ 90 (de partida), nenhuma mudança de layout, `npm run build` ok,
-  screenshots `docs/img/redesign/f0-*.png` lado a lado com `atual-*.png`.
+- Aceite: axe-core sem violações, 0 contrastes abaixo de AA (36 amostras medidas), 0 alvos
+  fora do mínimo, nenhuma mudança de layout, `npm run build` ok, screenshots
+  `docs/img/redesign/f0-*.png` lado a lado com `atual-*.png`.
 
 ### Fase 1 — Mesa: placas, moldura, régua (M)
 - `SeatPlate` (substitui `Seats`), `BoardFrame` com coordenadas fora, `MoveRibbon`,
@@ -556,7 +589,12 @@ o que funciona**: primeiro tokens (só CSS), depois estrutura, depois comportame
 - `ConnectWizard` com detecção automática (sessão sem assento → passo 2 ✓; assento → fecha).
 - `Modal` → `<dialog>`; `Toaster` acessível; confirmação de desistir como `popover`.
 - Aceite: fluxo "zero → IA conectada" testado com Claude Code real, com tempos anotados;
-  Lighthouse a11y ≥ 95; axe sem "critical/serious".
+  axe-core sem violações com os diálogos e popovers abertos.
+  **Não cumprido como escrito:** o servidor MCP `xadrez` está com `ConnectionRefused`
+  nesta máquina, então o wizard foi validado com fixtures e contra o backend real (detectou
+  sozinho 2 `mcpSessions` sem assento), mas **nunca com um cliente MCP no ar**. Continua
+  pendente. A parte de axe-core foi cumprida: 0 violações em 8 cenários na Fase 2, 17 na
+  Fase 4.
 
 ### Fase 3 — Tabuleiro acessível e modo revisão (G)
 - Camada `grid` do tabuleiro com teclado e `aria-label` por casa; regiões `aria-live`
@@ -573,19 +611,32 @@ o que funciona**: primeiro tokens (só CSS), depois estrutura, depois comportame
 ### Como validar em cada fase
 1. `docs/img/redesign/<fase>-{desktop,tablet,mobile}.png` gerados com o mesmo script
    Playwright usado para `atual-*.png` (1440×900, 1024×768, 390×844, `?mock=1`).
-2. Lighthouse (aba Acessibilidade) no `?mock=1` e numa partida real; meta ≥ 95 a partir da F2.
-3. Tabela de contraste recalculada com o mesmo `eval` (getComputedStyle) usado neste diagnóstico.
+2. **axe-core 4.x via Playwright** no `?mock=…` (todos os cenários) e numa partida real,
+   com os `<dialog>`/`popover` abertos; meta: 0 violações nas tags `wcag2a/2aa/21a/21aa/22aa`
+   e `best-practice`. (O plano original pedia Lighthouse; ele não existe nesta máquina e
+   nunca rodou — ver a nota no topo de §7.)
+3. Tabela de contraste recalculada com o mesmo `eval` (getComputedStyle) usado neste
+   diagnóstico, junto com alvos de toque e reflow em 1440/1024/390.
 4. Roteiro manual: (a) zero → IA conectada, (b) jogar 5 lances, (c) revisar e voltar,
    (d) lance recusado, (e) desistir e cancelar, (f) IA vs IA, (g) só teclado, (h) celular
    em modo retrato com teclado virtual aberto (input não pode cobrir o balão).
-5. Extender o `fixtures.ts` com cenários por query (`?mock=waiting`, `?mock=llmvsllm`,
-   `?mock=finished`, `?mock=empty`) para screenshots dos estados sem servidor.
+5. Extender o `fixtures.ts` com cenários por query para screenshots dos estados sem
+   servidor. Implementados: `?mock=1` (meio-jogo humano vs IA), `waiting`, `llmvsllm`,
+   `finished`, `empty` e — acrescentados pela Fase E do plano 09 — `bots` e `botsvsbots`.
 
 ---
 
 ## 8. Anexos
 
 ### 8.1 Tokens de design propostos
+
+> **Corrigido na Fase G (2026-09-22).** Este anexo foi escrito com os contrastes medidos
+> contra `--surface` (branco puro). Mas `--text-faint` também é usado sobre `--bg`
+> (`#f6f7f9`, o fundo da página) — coordenadas do tabuleiro, carimbo de hora, metadados da
+> placa —, e ali o valor proposto `#6b7583` dá **4,36:1**, abaixo do 4,5:1 exigido por
+> 1.4.3 (AA). O implementado é **`#646e7b`**: 4,83:1 sobre `--bg` e 5,17:1 sobre
+> `--surface`. Os comentários de razão abaixo foram refeitos **sobre `--bg`**, que é o pior
+> caso, e conferidos com o mesmo medidor por `getComputedStyle` usado no diagnóstico §1.7.
 
 ```css
 :root {
@@ -598,7 +649,7 @@ o que funciona**: primeiro tokens (só CSS), depois estrutura, depois comportame
 
   /* tipografia */
   --font-ui: system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-read: "Literata Variable", Charter, "Iowan Old Style", Georgia, serif;
+  --font-read: "Literata", Charter, "Iowan Old Style", Georgia, serif;
   --font-code: ui-monospace, "Cascadia Code", Consolas, Menlo, monospace;
   --fs-xs: .75rem; --fs-sm: .875rem; --fs-md: 1rem; --fs-lg: 1.0625rem;
   --fs-xl: 1.25rem; --fs-2xl: 1.625rem;
@@ -623,14 +674,14 @@ o que funciona**: primeiro tokens (só CSS), depois estrutura, depois comportame
   --paper: #f3efe4;      /* moldura em revisão, cartão de comentário */
   --border: #d9dde3;
   --border-strong: #b9c0ca;
-  --text: #1b1f26;       /* 15.6:1 sobre --surface */
-  --text-muted: #4e5866; /* 7.2:1 */
-  --text-faint: #6b7583; /* 4.9:1 — mínimo para texto */
-  --ink: #2f5fa8;        /* 5.6:1 sobre branco */
-  --ink-2: #6b5ea8;      /* 5.9:1 */
-  --good: #24784a;       /* 5.4:1 */
-  --attn: #8a5a12;       /* 5.9:1 (texto); âmbar de setas: #c9931f */
-  --threat: #b8322a;     /* 6.0:1 */
+  --text: #1b1f26;       /* 15.4:1 sobre --bg */
+  --text-muted: #4e5866; /* 6.7:1 */
+  --text-faint: #646e7b; /* 4.8:1 — mínimo para texto (ver nota acima) */
+  --ink: #2f5fa8;        /* 5.9:1 */
+  --ink-2: #6b5ea8;      /* 5.2:1 */
+  --good: #24784a;       /* 5.1:1 */
+  --attn: #8a5a12;       /* 5.5:1 (texto); âmbar de setas: --attn-bright #c9931f */
+  --threat: #b8322a;     /* 5.6:1 */
   --student: #5b6470;
   --on-ink: #ffffff;
   --focus: #2f5fa8;
@@ -647,20 +698,38 @@ o que funciona**: primeiro tokens (só CSS), depois estrutura, depois comportame
   --paper: #2a2823;      /* "papel" apagado para revisão/cartão */
   --border: #2a323d;
   --border-strong: #3c4652;
-  --text: #e8edf2;       /* 14.9:1 sobre --surface */
-  --text-muted: #aab4c0; /* 8.4:1 */
-  --text-faint: #8a95a3; /* 5.4:1 */
-  --ink: #8fb4ff;        /* 8.0:1 */
-  --ink-2: #b9adf0;      /* 8.6:1 */
+  --text: #e8edf2;       /* 15.4:1 sobre --bg */
+  --text-muted: #aab4c0; /* 8.6:1 */
+  --text-faint: #8a95a3; /* 6.0:1 */
+  --ink: #8fb4ff;        /* 8.8:1 */
+  --ink-2: #b9adf0;      /* 8.9:1 */
   --good: #5fcf8a;       /* 9.3:1 */
-  --attn: #f2c14e;       /* 10.6:1 */
-  --threat: #ff7b72;     /* 6.6:1 */
+  --attn: #f2c14e;       /* 10.8:1 */
+  --threat: #ff7b72;     /* 7.2:1 */
   --student: #a8b0bb;
   --on-ink: #0d1420;
   --focus: #8fb4ff;
   --shadow-board: 0 14px 36px rgb(0 0 0 / .55);
 }
 ```
+
+**O que a implementação mudou neste anexo** (Fase 0, confirmado na Fase G):
+
+- `--font-read` é `"Literata"`, não `"Literata Variable"`: a fonte é **auto-hospedada**
+  (`web/public/fonts/literata-latin-var.woff2` + itálico, OFL 1.1), sem Google Fonts, com
+  `@font-face` de eixo `200 900` e `font-display: swap`. O nome da família passou a ser o
+  da declaração local.
+- `--text-faint` do tema claro é `#646e7b` (ver nota no topo).
+- O âmbar de setas virou token de verdade, `--attn-bright`, em vez de um literal solto.
+- Tokens novos que o anexo não previa: `--tap: 28px` (alvo mínimo de 2.5.8), `--scrim`
+  (véu dos `<dialog>`), `--sq-last-to` (casa de destino do último lance, mais forte que a
+  de origem), `--coord` (coordenadas na moldura) e `--arrow-halo` (contorno escuro das
+  setas, igual nos dois temas, porque as casas não mudam com o tema).
+- `--sq-select`, `--sq-check` e o quarteto `--arrow-good/attn/threat/ink` não viraram
+  tokens: os componentes leem `--ink`/`--threat`/`--good`/`--attn` direto, e o alias só
+  acrescentaria uma camada.
+- As sombras deixaram de ser invariantes: o tema claro usa cinza-azulado com pouca
+  opacidade (`rgb(27 31 38 / .18)`), porque preto a 35% sobre `--bg` claro fica sujo.
 
 Regras de uso: texto usa `--text*`; estado usa `--ink/--good/--attn/--threat`; fundo de
 cartão de comentário = `--surface` com traço lateral 3 px da categoria; nunca `rgba(255,255,255,.07)`
@@ -717,3 +786,21 @@ metáforas naturais. *Contras*: exige auto-hospedar uma fonte (~120 KB) e constr
    opções) e **notação com figurinhas** por padrão.
 5. **CSS puro + `<dialog>`/`popover` nativos** em vez de Radix/shadcn; tema claro/escuro
    seguindo o sistema por padrão, com toggle.
+
+---
+
+## 10. Status das decisões (aprovadas em 2026-09-22)
+
+Todas as decisões da seção 9 foram **aprovadas como escritas**, sem alterações:
+
+1. ✅ Direção "partida comentada": Literata auto-hospedada para a voz da professora + sans
+   do sistema para a UI.
+2. ✅ Régua horizontal de lances sob o tabuleiro substitui a tabela `MoveList` no desktop;
+   a tabela vira aba opcional no Caderno.
+3. ✅ Placas acima/abaixo do tabuleiro; `StatusBar` eliminado.
+4. ✅ Preset "papel e oliva" como padrão ("madeira" e "ardósia" como opções); notação com
+   figurinhas por padrão.
+5. ✅ CSS puro + `<dialog>`/`popover` nativos (sem Radix/shadcn); tema claro/escuro do
+   sistema com toggle.
+
+Execução acompanhada em [`11-execucao.md`](11-execucao.md).
