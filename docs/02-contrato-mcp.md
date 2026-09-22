@@ -18,6 +18,9 @@ Tipos referenciados: `shared/types.ts` (`GameState`, `TurnEvent`, ...).
   Só erros inesperados viram exceção.
 - Toda tool que muda o estado faz broadcast WS e acorda `wait_for_turn` do outro assento.
 - Toda chamada de tool atualiza `seats[minhaCor].lastSeenAt` se a sessão estiver sentada.
+- Mensagens do humano pendentes para a cor da sessão são incluídas no texto de **qualquer**
+  tool (não só `wait_for_turn`) e marcadas como entregues (`deliveredTo`) nessa resposta.
+- O servidor MCP declara `instructions` (resumo do protocolo de jogo) no `initialize`.
 
 ## Ferramentas
 
@@ -48,6 +51,9 @@ Entra na partida atual num assento livre (ou retoma o seu).
 
 Regras de retomada: se o assento é `mcp` e a sessão dona está fechada ou sem atividade há
 > 120 s, ou se `my_name` é igual ao nome do assento, `join_game` retoma sem `force`.
+Se a sessão chamadora já está sentada e chama `join_game` sem `color` (ou com a mesma cor),
+apenas o nome é atualizado; com a outra cor, ela troca de assento (o antigo fica vazio).
+Se os dois assentos estão livres e `color` foi omitido, retorna erro pedindo a cor.
 Se o assento é `human`, `join_game` **converte para mcp** apenas com `force: true`
 (o humano vira espectador). Gera evento `opponent_joined` para o outro assento.
 
@@ -61,8 +67,8 @@ Joga um lance pela cor da sessão chamadora.
 | Parâmetro | Tipo | Descrição |
 |-----------|------|-----------|
 | `move` | string | SAN (`"Nf3"`, `"exd5"`, `"O-O"`, `"e8=Q"`) ou UCI (`"g1f3"`, `"e7e8q"`). Aceita variações comuns: `"0-0"`, `"Nf3+"` sem xeque real, `"nf3"` minúsculo (normalizar) |
-| `comment` | string? | comentário do professor exibido junto com o lance ("Ataco o cavalo e preparo o roque") |
-| `comment_category` | `CommentCategory`? | default `"plan"` |
+| `comment` | string? | comentário do professor exibido junto com o lance ("Ataco o cavalo e preparo o roque"). Vai para `MoveRecord.comment` e para o PGN (`{...}`) |
+| `comment_category` | `CommentCategory`? | aceito, mas **não é armazenado** na v1: `MoveRecord` não tem categoria e a UI mostra o comentário do lance sempre com o ícone de "plano". Para comentar com outra categoria, use a tool `comment` |
 
 Validação: sessão deve estar sentada; deve ser sua vez; partida ativa; lance legal.
 Erro de lance ilegal retorna `isError: true` com:
@@ -96,7 +102,17 @@ Retorna `TurnEvent & { state }`:
 Eventos são enfileirados **por assento**; `wait_for_turn` drena a fila e, se houver mais
 de um evento, retorna o mais importante (`game_over` > `opponent_moved` > `your_turn` >
 `takeback` > `new_game` > `opponent_joined` > `message`) com todos os `messages` juntos.
-Nunca perde eventos que aconteceram enquanto a LLM não estava esperando.
+Nunca perde eventos que aconteceram enquanto a LLM não estava esperando. Eventos obsoletos
+são descartados no drenagem (ex.: `opponent_moved` quando já não é sua vez, `message` já
+entregue). Se `timeout_seconds` for omitido/fora da faixa, é limitado a 1–120.
+
+Enquanto bloqueada, a tool envia `notifications/progress` a cada 10 s **se** o cliente
+mandou `_meta.progressToken` (mantém vivo o stream SSE em clientes que exigem atividade).
+Se a sessão perder o assento durante a espera (`new_game` do humano sem mantê-la, `force`
+de outra LLM, `leave_game`), a resposta é `not_seated`. Se o humano cria uma partida pelo
+navegador e a sessão continua sentada, chega `new_game` (a cor pode mudar: releia o estado).
+`ServerInfo.mcpSessions[].waiting = true` enquanto a sessão está bloqueada aqui (a UI mostra
+"aguardando" no assento).
 
 ### `comment`
 Envia um comentário de professor sem jogar.
@@ -107,7 +123,9 @@ Envia um comentário de professor sem jogar.
 | `category` | `CommentCategory`? | default `"lesson"` |
 | `highlight` | `{ squares?: string[] \| {square,color}[], arrows?: {from,to,color?}[] }`? | desenho anexado |
 
-Retorna o estado (curto). Não muda a vez.
+Retorna o estado (curto). Não muda a vez. Se `highlight` vier preenchido, ele fica anexado ao
+comentário (`Commentary.highlight`) **e** substitui o destaque atual do tabuleiro
+(`state.highlight`, com `ply` = ply atual).
 
 ### `highlight`
 Desenha no tabuleiro (substitui o destaque anterior).
@@ -118,8 +136,14 @@ Desenha no tabuleiro (substitui o destaque anterior).
 | `arrows` | `{from, to, color?}[]`? | setas |
 | `clear` | boolean? | apaga tudo (ignora os outros campos) |
 
-Cores aceitas: qualquer CSS color; sugerir `"green"`, `"red"`, `"blue"`, `"yellow"`.
-A UI limpa o destaque automaticamente quando um lance é jogado.
+Cores aceitas: qualquer CSS color; sugerir `"green"`, `"red"`, `"blue"`, `"yellow"`
+(a UI mapeia esses nomes para tons próprios; outras strings CSS passam direto).
+**Ciclo de vida do destaque:** o servidor grava `state.highlight` com `ply` = ply atual e
+**não** o apaga quando um lance é jogado; é a UI que só desenha o destaque enquanto
+`highlight.ply === state.ply`. O servidor apaga o destaque em `takeback`, em `new_game`,
+em `highlight(clear: true)` e em `POST /api/highlight/clear` (botão "Limpar desenho").
+Chamar `highlight` sem casas nem setas também apaga; `comment` sem `highlight` não mexe no
+destaque atual.
 
 ### `takeback`
 Desfaz lances (para corrigir um erro do aluno ou refazer uma posição de aula).
@@ -128,15 +152,24 @@ Desfaz lances (para corrigir um erro do aluno ou refazer uma posição de aula).
 |-----------|------|---------|
 | `plies` | number (1–10) | `2` |
 
-Retorna estado. Gera evento `takeback` para o oponente.
+Retorna estado. Gera evento `takeback` para o oponente e apaga o destaque. Se `plies` for
+maior que o histórico, desfaz tudo. Funciona também depois de um fim decidido pelo tabuleiro
+(mate, afogamento, ...): a partida volta a ficar em andamento. Não funciona depois de
+desistência/empate acordado/aborto.
 
 ### `end_game`
 | Parâmetro | Tipo | Descrição |
 |-----------|------|-----------|
 | `how` | `"resign" \| "draw" \| "abort"` | `resign`: a cor da sessão perde. `draw`: empate acordado. `abort`: sem resultado |
 
+`draw` também serve para **aceitar** uma oferta de empate do humano (`state.drawOffer`), que
+chega como mensagem: `Ofereço empate. Para aceitar, chame end_game(how: "draw")...`.
+Gera `game_over` para o oponente.
+
 ### `leave_game`
-Sem parâmetros. Libera o assento da sessão (vira `empty`). Útil antes de outra LLM entrar.
+Sem parâmetros. Libera o assento da sessão (vira `empty`, mas o **nome é mantido** para a
+UI continuar mostrando "X venceu" e o PGN manter os headers). Útil antes de outra LLM
+entrar. Se a partida estava em andamento, ela fica em `status: "waiting"` até alguém sentar.
 
 ## Prompt: `chess_teacher`
 Argumentos: `student_level` (`"beginner" | "intermediate" | "advanced"`, default beginner),
@@ -193,6 +226,11 @@ Lances legais (é a vez das brancas; 31): a3 a4 b3 b4 Bd2 Be3 Bg5 Bxf7+ ... (cap
 Mensagens do aluno (1 nova):
  - [lance 12] "por que você jogou o cavalo pra f6 e não pra h5?"
 ```
+
+Em modo LLM vs LLM, os últimos 3 comentários do oponente aparecem numa seção
+"Últimos comentários de <nome>". Respostas de erro e de tools "leves" (`comment`,
+`highlight`, `end_game`, `leave_game`, `wait_for_turn` com `timeout`) usam a versão
+**curta** (sem ASCII, sem lista de lances legais).
 
 Regras do formatador:
 - Sempre incluir: cabeçalho, próximo passo, FEN, listas de peças, ASCII, histórico completo

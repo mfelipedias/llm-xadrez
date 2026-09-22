@@ -23,7 +23,10 @@ export function Controls(props: ControlsProps) {
   const humanColors = (["white", "black"] as Color[]).filter((c) => state.seats[c].kind === "human");
   const active = state.status === "active";
   const hasHuman = humanColors.length > 0;
-  const hasHighlight = state.highlight !== null && (state.highlight.arrows.length > 0 || state.highlight.squares.length > 0);
+  const hasHighlight =
+    state.highlight !== null &&
+    state.highlight.ply === state.ply &&
+    (state.highlight.arrows.length > 0 || state.highlight.squares.length > 0);
 
   if (group === "board") {
     return (

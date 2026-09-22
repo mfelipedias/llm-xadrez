@@ -35,7 +35,8 @@ novo, adicione-o como opcional.
 | `npm run build` | typecheck web + `vite build` → `web/dist` |
 | `npm start` | servidor em produção servindo `web/dist` |
 | `npm test` | vitest (server) |
-| `npm run smoke` | cliente MCP de teste ponta a ponta |
+| `npm run smoke` | cliente MCP de teste ponta a ponta (2 cenários, termina com `OK`) |
+| `npm run play` | "IA de mentira": cliente MCP que joga/comenta na partida atual (ver docs/05) |
 | `npm run typecheck` | `tsc --noEmit` em server e web |
 
 ## Referências rápidas

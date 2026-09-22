@@ -44,6 +44,41 @@ npx cloudflared tunnel --url http://localhost:3939
 Configurar o cliente com a URL pública `/mcp` e header `Authorization: Bearer <token>`.
 A UI (`/`) continua sem senha — não deixe o túnel aberto além do necessário.
 
+## Testar sem um cliente LLM: `npm run play`
+`scripts/mcp-play.ts` é uma "IA de mentira": um cliente MCP real
+(`StreamableHTTPClientTransport`) que senta num assento e fica no ciclo
+`wait_for_turn` ↔ `make_move`, jogando lances de abertura simples (depois capturas/aleatório),
+publicando um `comment` com setas e casas após cada lance e respondendo às mensagens do
+humano. Serve para validar servidor + UI de ponta a ponta sem gastar tokens.
+
+```bash
+npm start                       # servidor no ar (ou npm run dev)
+npm run play                    # join_game(color: "black", my_name: "Claude Teste")
+# no navegador: Nova partida → "Eu de brancas vs IA" → jogue; a IA responde em ~1 s
+```
+
+Variáveis de ambiente (todas opcionais):
+
+| Variável | Default | Descrição |
+|----------|---------|-----------|
+| `PLAY_URL` | `http://localhost:3939` | base do servidor |
+| `PLAY_NAME` | `Claude Teste` | nome exibido na UI |
+| `PLAY_COLOR` | `black` | `white` \| `black` \| `random` |
+| `PLAY_MODE` | `join` | `join` = `join_game` na partida atual; `new` = `new_game` (cria outra) |
+| `PLAY_OPPONENT` | `human` | só com `PLAY_MODE=new`: `human` ou `llm` |
+| `PLAY_FORCE` | `0` | `1` = `join_game(force: true)` |
+| `PLAY_MAX_MOVES` | ∞ | sai (`leave_game`) depois de N lances próprios |
+| `PLAY_DELAY_MS` | `800` | pausa antes de cada lance (para ver a animação) |
+| `PLAY_WAIT_SECONDS` | `60` | `timeout_seconds` do `wait_for_turn` (1–120) |
+
+LLM vs LLM sem nenhum cliente: na UI, "Nova partida → IA vs IA (assistir)" e, em dois
+terminais, `PLAY_COLOR=white PLAY_NAME="LLM Alpha" npm run play` e
+`PLAY_COLOR=black PLAY_NAME="LLM Beta" npm run play`. O script termina sozinho em
+`game_over` (ou em `PLAY_MAX_MOVES`); Ctrl+C também libera o assento.
+Já `npm run smoke` (`scripts/mcp-smoke.ts`) é o teste automatizado: roda dois cenários
+completos (humano vs LLM até o mate, LLM vs LLM) contra o servidor no ar ou um spawnado
+em `:3940`, e termina com `OK`.
+
 ## Duas LLMs na mesma partida
 1. Chat A (ex.: Claude Desktop): "crie uma partida de xadrez de brancas contra outra IA e
    comente cada lance". → `new_game({ my_color: "white", opponent: "llm", my_name: "Claude Desktop" })`.

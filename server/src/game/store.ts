@@ -475,7 +475,9 @@ export class GameStore extends EventEmitter {
       const sid = seat.sessionId;
       this.cancelWaiters((w) => w.sessionId === sid || w.color === color, "not_seated");
     }
-    this.seats[color] = { kind: "empty", name: "" };
+    // Mantém o nome no assento vazio (como em restoreSeat): a UI ainda mostra "X venceu" e o PGN
+    // conserva o header White/Black depois de um leave_game pós-partida.
+    this.seats[color] = { kind: "empty", name: seat.name };
     this.queues[color] = [];
     this.setHeaders();
     this.touch();
@@ -556,7 +558,14 @@ export class GameStore extends EventEmitter {
     if (this.endReason) throw new GameError("game_finished", "A partida já terminou. Chame new_game para começar outra.");
     const status = this.computeStatus();
     if (status !== "active") {
-      throw new GameError("game_not_active", "A partida ainda não começou: o outro assento está vazio. Aguarde o oponente (wait_for_turn).");
+      const empty = (["white", "black"] as Color[]).find((c) => this.seats[c].kind === "empty");
+      const emptyPt = empty === "white" ? "das brancas" : "das pretas";
+      throw new GameError(
+        "game_not_active",
+        this.history.length === 0
+          ? `A partida ainda não começou: o assento ${emptyPt} está vazio. Aguarde o oponente (wait_for_turn).`
+          : `A partida está pausada: o assento ${emptyPt} ficou vazio (o oponente saiu). Aguarde alguém sentar (wait_for_turn).`,
+      );
     }
     if (this.turn !== color) {
       const turnPt = this.turn === "white" ? "brancas" : "pretas";

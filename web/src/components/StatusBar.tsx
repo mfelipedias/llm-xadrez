@@ -6,11 +6,18 @@ function opposite(color: Color): Color {
   return color === "white" ? "black" : "white";
 }
 
+/** Nome do ocupante ou, se o assento ficou vazio (leave_game), o nome da cor. */
+function seatName(state: GameState, color: Color): string {
+  const name = state.seats[color].name.trim();
+  if (name) return name;
+  return color === "white" ? "Brancas" : "Pretas";
+}
+
 export function statusText(state: GameState): string {
   const { seats } = state;
 
   if (state.status === "finished") {
-    const winnerName = state.winner ? seats[state.winner].name : "";
+    const winnerName = state.winner ? seatName(state, state.winner) : "";
     switch (state.endReason) {
       case "checkmate":
         return `Xeque-mate — ${winnerName} venceu`;
@@ -24,7 +31,7 @@ export function statusText(state: GameState): string {
         return "Empate pela regra dos 50 lances";
       case "resignation":
         return state.winner
-          ? `${seats[opposite(state.winner)].name} desistiu — ${winnerName} venceu`
+          ? `${seatName(state, opposite(state.winner))} desistiu — ${winnerName} venceu`
           : "Partida encerrada por desistência";
       case "draw_agreed":
         return "Empate acordado";

@@ -73,7 +73,8 @@ llm-xadrez/
 │   ├── tsconfig.json
 │   └── vite.config.ts
 ├── scripts/
-│   └── mcp-smoke.ts         # cliente MCP de teste: joga uma partida inteira via HTTP
+│   ├── mcp-smoke.ts         # cliente MCP de teste: joga uma partida inteira via HTTP
+│   └── mcp-play.ts          # "IA de mentira": cliente MCP que joga/comenta (npm run play)
 ├── data/                    # gerado em runtime (gitignored): current-game.json, games/*.pgn
 ├── .mcp.json                # registro do servidor MCP para o Claude Code neste repo
 ├── package.json             # pacote único (server + web), scripts npm

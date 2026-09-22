@@ -264,7 +264,8 @@ export function App() {
 
   const interactive =
     state.status === "active" && state.seats[state.turn].kind === "human" && previewPly === null && (connected || mock);
-  const highlight = previewPly === null ? state.highlight : null;
+  // O servidor não apaga o destaque ao jogar: a UI só o mostra enquanto o ply for o mesmo em que foi criado.
+  const highlight = previewPly === null && state.highlight && state.highlight.ply === state.ply ? state.highlight : null;
 
   const capturedRow = (
     <div className="captured" aria-label="Peças capturadas">

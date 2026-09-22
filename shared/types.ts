@@ -175,7 +175,10 @@ export interface GameState {
   materialBalance: number;
 
   commentary: Commentary[];
-  /** Mensagens do humano ainda não entregues a pelo menos um destinatário. */
+  /**
+   * Mensagens do humano desta partida (entregues ou não — ver `deliveredTo`), no máximo as
+   * 100 mais recentes. A UI mostra todas no feed; a LLM só recebe as ainda não entregues a ela.
+   */
   humanMessages: HumanMessage[];
   highlight: Highlight | null;
 

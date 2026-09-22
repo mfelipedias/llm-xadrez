@@ -13,6 +13,7 @@
     "test": "vitest run --config server/vitest.config.ts",
     "test:watch": "vitest --config server/vitest.config.ts",
     "smoke": "tsx scripts/mcp-smoke.ts",
+    "play": "tsx scripts/mcp-play.ts",
     "typecheck": "tsc -p server --noEmit && tsc -p web --noEmit"
   },
   "dependencies": {
