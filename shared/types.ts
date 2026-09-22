@@ -187,7 +187,14 @@ export interface GameState {
 export interface ServerInfo {
   version: string;
   mcpUrl: string; // ex.: http://localhost:3939/mcp
-  mcpSessions: { sessionId: string; name?: string; seat?: Color; lastSeenAt?: string }[];
+  mcpSessions: {
+    sessionId: string;
+    name?: string;
+    seat?: Color;
+    lastSeenAt?: string;
+    /** true enquanto a sessão está bloqueada em wait_for_turn (UI: "aguardando"). */
+    waiting?: boolean;
+  }[];
 }
 
 export type WsServerMessage =

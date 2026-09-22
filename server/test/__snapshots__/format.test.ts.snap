@@ -1,0 +1,62 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`formatStateForLLM > meio-jogo, perspectiva das pretas (é sua vez: lista lances legais e mensagens) 1`] = `
+"# Partida 3f2a — lance 7, vez das PRETAS (você, LLM)
+Você joga de PRETAS como "Claude". Status: em andamento. Sem xeque.
+Último lance: 7. h3 (Felipe). Material: igual (0).
+➡ Próximo passo: É sua vez: chame make_move com um dos lances legais.
+
+FEN: r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/2NP1N1P/PPP2PP1/R1BQ1RK1 b - - 0 7
+
+Brancas (Felipe): K g1 · Q d1 · R a1 f1 · B c1 c4 · N c3 f3 · P a2 b2 c2 d3 e4 f2 g2 h3
+Pretas (você):    K g8 · Q d8 · R a8 f8 · B c5 c8 · N c6 f6 · P a7 b7 c7 d6 e5 f7 g7 h7
+Capturadas: brancas tomaram — · pretas tomaram —
+
+   +------------------------+
+ 8 | r  .  b  q  .  r  k  . |
+ 7 | p  p  p  .  .  p  p  p |
+ 6 | .  .  n  p  .  n  .  . |
+ 5 | .  .  b  .  p  .  .  . |
+ 4 | .  .  B  .  P  .  .  . |
+ 3 | .  .  N  P  .  N  .  P |
+ 2 | P  P  P  .  .  P  P  . |
+ 1 | R  .  B  Q  .  R  K  . |
+   +------------------------+
+     a  b  c  d  e  f  g  h
+
+Histórico: 1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. d3 Nf6 5. Nc3 d6 6. O-O O-O 7. h3
+
+Lances legais (é a sua vez; 37): Rb8 Bd7 Be6 Bf5 Bg4 Bxh3 Qe8 Qe7 Qd7 Re8 Kh8 a6 a5 b6 b5 g6 g5 h6 h5 Nb8 Ne7 Nd4 Nb4 Na5 d5 Nd7 Ne8 Nh5 Ng4 Nxe4 Nd5 Bb6 Bd4 Be3 Bxf2+ Bb4 Ba3 (capturas: Bxh3, Nxe4, Bxf2+; xeques: Bxf2+)
+
+Mensagens do aluno (1 nova):
+ - [lance 7] "por que você jogou o cavalo pra f6 e não pra h5?""
+`;
+
+exports[`formatStateForLLM > posição inicial, perspectiva das pretas (não é sua vez) 1`] = `
+"# Partida 3f2a — lance 1, vez das BRANCAS (Felipe, humano)
+Você joga de PRETAS como "Claude". Status: em andamento. Sem xeque.
+Nenhum lance ainda. Material: igual (0).
+➡ Próximo passo: Não é sua vez. Chame wait_for_turn.
+
+FEN: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
+
+Brancas (Felipe): K e1 · Q d1 · R a1 h1 · B c1 f1 · N b1 g1 · P a2 b2 c2 d2 e2 f2 g2 h2
+Pretas (você):    K e8 · Q d8 · R a8 h8 · B c8 f8 · N b8 g8 · P a7 b7 c7 d7 e7 f7 g7 h7
+Capturadas: brancas tomaram — · pretas tomaram —
+
+   +------------------------+
+ 8 | r  n  b  q  k  b  n  r |
+ 7 | p  p  p  p  p  p  p  p |
+ 6 | .  .  .  .  .  .  .  . |
+ 5 | .  .  .  .  .  .  .  . |
+ 4 | .  .  .  .  .  .  .  . |
+ 3 | .  .  .  .  .  .  .  . |
+ 2 | P  P  P  P  P  P  P  P |
+ 1 | R  N  B  Q  K  B  N  R |
+   +------------------------+
+     a  b  c  d  e  f  g  h
+
+Histórico: (nenhum lance ainda)
+
+Lances legais: 20 para as brancas (não é sua vez; não listados)."
+`;
