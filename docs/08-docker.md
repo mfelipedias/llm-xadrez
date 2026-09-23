@@ -12,6 +12,28 @@ docker compose up -d --build
   Claude Desktop/Claude Code no host, `localhost:3939` funciona normalmente).
 - Estado e partidas ficam em `./data` (volume). Sobrevivem a `docker compose down`.
 
+## Permissões (`./data` e `providers.json`)
+O bind mount expõe `./data` do host para `/app/data`; a permissão que importa é a do
+arquivo **no host**. Num clone novo, o `docker-compose.yml` já garante que o container
+roda como o usuário do host:
+
+```yaml
+user: "${UID:-1000}:${GID:-1000}"
+```
+
+- `UID`/`GID` vêm do ambiente do host (definidos em shells Linux/macOS). Sem eles,
+  o fallback é `1000`, que é o uid do usuário `node` da imagem.
+- Num Linux com UID diferente de 1000, o `./data` do host é criado/mantido com o dono
+  correto e o container escreve sem `EACCES`.
+- Docker Desktop (Windows/macOS) abstrai o dono — não costuma aparecer o problema.
+- Se a pasta virar `root:root` (ex.: subiu com `sudo`), corrija:
+  ```bash
+  sudo chown -R $(id -u):$(id -g) data
+  ```
+
+O mesmo vale para `./providers.json` (a tela "Provedores" grava nele): se a UI reclamar
+ao salvar, o dono do arquivo no host precisa ser o seu, ou o UID do usuário do host.
+
 ## Comandos úteis
 ```bash
 docker compose logs -f xadrez     # ver o banner com as URLs e os comandos de conexão

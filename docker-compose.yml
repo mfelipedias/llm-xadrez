@@ -3,6 +3,9 @@ services:
     build: .
     image: llm-xadrez:latest
     container_name: llm-xadrez
+    # Escreve o volume com o usuário do host (evita EACCES em ./data e ./providers.json
+    # quando o UID do usuário difere do uid 1000 do usuário "node" da imagem).
+    user: "${UID:-1000}:${GID:-1000}"
     ports:
       # UI, API, WebSocket e MCP na mesma porta: http://localhost:3939 e http://localhost:3939/mcp
       - "3939:3939"
