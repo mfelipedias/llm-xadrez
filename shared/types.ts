@@ -235,7 +235,19 @@ export interface ServerInfo {
     lastSeenAt?: string;
     /** true enquanto a sessão está bloqueada em wait_for_turn (UI: "aguardando"). */
     waiting?: boolean;
+    /**
+     * true se a sessão fez uma requisição recentemente (ou está em wait_for_turn).
+     * Sessões sem atividade há muito tempo são fechadas pelo servidor; até lá, `false`.
+     */
+    active?: boolean;
   }[];
+  /**
+   * Autenticação exigida em /mcp: "none" ou "token" (MCP_TOKEN definido — aceito como
+   * `Authorization: Bearer <token>` ou `?token=<token>` na URL). O token NUNCA vem aqui.
+   */
+  mcpAuth?: "none" | "token";
+  /** Como o servidor está rodando: muda os snippets de conexão e as dicas de rede. */
+  runtime?: "docker" | "node";
   /** Provedores configurados (sem chaves). Ausente se a camada de provedores não está ativa. */
   providers?: ProviderPublic[];
   /** Perfis de bot disponíveis (docs/09, seção 4.2). */
@@ -303,7 +315,45 @@ export interface ProviderPublic {
   local: boolean;
   paid: boolean;
   lastTest?: { ok: boolean; at: string; latencyMs?: number; error?: string; models?: number };
+  /** Timeout de uma chamada ao modelo, em ms. */
+  timeoutMs?: number;
+  /** Id do preset de origem, quando o provedor foi criado a partir de um (informativo). */
+  preset?: string;
 }
+
+/** Resposta de GET /api/providers. */
+export interface ProvidersResponse {
+  providers: ProviderPublic[];
+  profiles: BotProfile[];
+  presets: string[];
+  /**
+   * NOMES (nunca valores) das variáveis de ambiente com cara de chave (`*_API_KEY`,
+   * `*_KEY`, `*_TOKEN`) definidas e não vazias no servidor — exceto MCP_TOKEN/ADMIN_TOKEN.
+   * A UI usa para sugerir o `apiKeyEnv` de um provedor novo.
+   */
+  envKeys?: string[];
+  /** false quando quem pediu não pode gravar (não é localhost/rede confiável e não mandou o token). */
+  canAdmin?: boolean;
+  /** true se um token de administração é aceito (ADMIN_TOKEN ou MCP_TOKEN definido). */
+  adminTokenAccepted?: boolean;
+}
+
+/** Corpo de PUT /api/providers/:id (cria ou atualiza). `null` ou "" limpa um campo opcional. */
+export interface ProviderUpsert {
+  name?: string;
+  kind?: ProviderKind;
+  baseUrl?: string | null;
+  apiKeyEnv?: string | null;
+  toolMode?: ToolMode;
+  local?: boolean;
+  paid?: boolean;
+  timeoutMs?: number | null;
+}
+
+/** Resultado de POST /api/providers/:id/test. */
+export type ProviderTestResponse =
+  | { ok: true; latencyMs: number; models?: number }
+  | { ok: false; error: string; /** Dica acionável em pt-BR (rede do Docker, OLLAMA_HOST…). */ hint?: string };
 
 export interface BotLimits {
   maxTokensPerGame?: number;
@@ -356,6 +406,12 @@ export interface ApiError {
   error: string;
   /** Presente em lance ilegal. */
   legalMoves?: string[];
+  /**
+   * Código estável para a UI reagir. "admin_forbidden": rota de administração recusada;
+   * se `adminTokenAccepted`, a UI pode pedir o token e reenviar com `Authorization: Bearer`.
+   */
+  code?: "admin_forbidden";
+  adminTokenAccepted?: boolean;
 }
 
 /* ---------- Eventos entregues a quem espera em wait_for_turn ---------- */

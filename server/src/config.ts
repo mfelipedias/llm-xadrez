@@ -43,6 +43,17 @@ export interface Config {
   dataDir: string;
   lang: Lang;
   mcpToken: string;
+  /** Token das rotas de administração (ADMIN_TOKEN; vazio = usa o MCP_TOKEN). */
+  adminToken: string;
+  /**
+   * IPs/CIDRs além do loopback que podem administrar sem token (ADMIN_ALLOW_FROM,
+   * separados por vírgula). No Docker, o compose passa a rede da bridge.
+   */
+  adminAllowFrom: string[];
+  /** Hosts extras aceitos no header Host (ALLOWED_HOSTS), além de localhost e do host da PUBLIC_URL. */
+  allowedHosts: string[];
+  /** true quando roda dentro de um container (/.dockerenv ou RUNTIME=docker). */
+  inDocker: boolean;
   humanName: string;
   version: string;
   isProduction: boolean;
@@ -65,6 +76,13 @@ function parseBool(raw: string | undefined, fallback: boolean): boolean {
   return !/^(0|false|no|off)$/i.test(raw.trim());
 }
 
+function parseList(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const port = parsePort(env.PORT, 3939);
   const host = (env.HOST ?? "127.0.0.1").trim() || "127.0.0.1";
@@ -84,6 +102,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dataDir,
     lang: parseLang(env.LANG),
     mcpToken: (env.MCP_TOKEN ?? "").trim(),
+    adminToken: (env.ADMIN_TOKEN ?? "").trim() || (env.MCP_TOKEN ?? "").trim(),
+    adminAllowFrom: parseList(env.ADMIN_ALLOW_FROM),
+    allowedHosts: parseList(env.ALLOWED_HOSTS),
+    inDocker: env.RUNTIME === "docker" || (env.RUNTIME !== "node" && fs.existsSync("/.dockerenv")),
     humanName: (env.HUMAN_NAME ?? "").trim() || "Você",
     version: readVersion(),
     isProduction: env.NODE_ENV === "production",
