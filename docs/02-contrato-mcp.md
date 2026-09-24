@@ -1,6 +1,9 @@
 # 02 — Contrato MCP (ferramentas, prompt, recursos)
 
 Endpoint: `POST http://localhost:3939/mcp` (Streamable HTTP, sessões com estado).
+Com `MCP_TOKEN` definido, o token vai como `Authorization: Bearer <token>` **ou** como
+`?token=<token>` na URL (para clientes que não mandam header, como Claude.ai e ChatGPT).
+Sessões sem requisição há 30 min são fechadas (docs/03 → MCP).
 Servidor MCP: `name: "llm-xadrez"`, `version` do package.json.
 Tipos referenciados: `shared/types.ts` (`GameState`, `TurnEvent`, ...).
 
@@ -21,6 +24,9 @@ Tipos referenciados: `shared/types.ts` (`GameState`, `TurnEvent`, ...).
 - Mensagens do humano pendentes para a cor da sessão são incluídas no texto de **qualquer**
   tool (não só `wait_for_turn`) e marcadas como entregues (`deliveredTo`) nessa resposta.
 - O servidor MCP declara `instructions` (resumo do protocolo de jogo) no `initialize`.
+  Elas mandam a IA **começar por `join_game`** quando há partida em andamento ou assento
+  esperando uma LLM, e só chamar `new_game` quando o usuário pedir uma partida nova; e
+  dizem que `timeout` em `wait_for_turn` é normal (chame de novo).
 - Um assento pode ser ocupado por um **bot do servidor** (`SeatKind: "bot"`, docs/09). Do
   ponto de vista de uma sessão MCP externa, um bot é só "outra LLM": ele entra nas mesmas
   filas de evento, aparece como oponente no texto de estado ("LLM (bot do servidor)") e o
@@ -31,7 +37,11 @@ Tipos referenciados: `shared/types.ts` (`GameState`, `TurnEvent`, ...).
 
 ### `new_game`
 Cria uma nova partida (encerra a atual, salvando o PGN em `data/games/`) e senta a sessão
-chamadora na cor escolhida.
+chamadora na cor escolhida. **Recusa** (`isError: true`, sem mexer em nada) quando a
+partida atual não terminou e (a) já tem lances, ou (b) tem assento esperando uma LLM — o
+caso típico de "Aguardando MCP" na UI ou de um servidor recém-reiniciado. O texto da
+recusa manda chamar `join_game`; `confirm: true` passa por cima, e só deve ser usado quando
+o usuário pediu explicitamente uma partida nova.
 
 | Parâmetro | Tipo | Default | Descrição |
 |-----------|------|---------|-----------|
@@ -40,13 +50,15 @@ chamadora na cor escolhida.
 | `my_name` | string | `"Claude"` | nome exibido na UI |
 | `opponent_name` | string | `"Você"` | nome do humano (ignorado se `opponent = "llm"`) |
 | `start_fen` | string | posição inicial | para estudar uma posição específica (aula, final, puzzle) |
+| `confirm` | boolean | `false` | obrigatório (`true`) para substituir uma partida em andamento ou com assento esperando uma LLM |
 
 Retorna o estado. Se for a vez da LLM (`my_color = white` na posição inicial), o texto diz
 "É sua vez: chame make_move". Se `opponent = "llm"`, diz "Aguardando outra LLM entrar com
 join_game(color: 'black'). Chame wait_for_turn."
 
 ### `join_game`
-Entra na partida atual num assento livre (ou retoma o seu).
+Entra na partida atual num assento livre (ou retoma o seu), **sem mexer no tabuleiro**.
+Sem `color`, escolhe o assento que está esperando uma LLM (o único livre).
 
 | Parâmetro | Tipo | Default | Descrição |
 |-----------|------|---------|-----------|
@@ -54,8 +66,12 @@ Entra na partida atual num assento livre (ou retoma o seu).
 | `my_name` | string | `"Claude"` | |
 | `force` | boolean | `false` | toma o assento mesmo que outra sessão MCP esteja ativa nele |
 
-Regras de retomada: se o assento é `mcp` e a sessão dona está fechada ou sem atividade há
-> 120 s, ou se `my_name` é igual ao nome do assento, `join_game` retoma sem `force`.
+Regras de retomada: se o assento é `mcp` e a sessão dona está **fechada**, ou **ociosa há
+mais de 5 min** (nenhuma requisição e nenhum `wait_for_turn` pendente), `join_game` o toma
+sem `force`. Uma sessão bloqueada em `wait_for_turn` nunca conta como ociosa. **Mesmo
+`my_name` não basta** para tomar o assento de uma sessão viva (duas LLMs podem se chamar
+"Claude"): o nome só serve para retomar quando o dono já se foi. O erro diz há quanto tempo
+o dono teve atividade e sugere `force: true` só se aquela sessão é sua e travou.
 Se a sessão chamadora já está sentada e chama `join_game` sem `color` (ou com a mesma cor),
 apenas o nome é atualizado; com a outra cor, ela troca de assento (o antigo fica vazio).
 Se os dois assentos estão livres e `color` foi omitido, retorna erro pedindo a cor.
@@ -93,7 +109,7 @@ Bloqueia até acontecer algo relevante para a sessão chamadora ou até o timeou
 
 | Parâmetro | Tipo | Default | Descrição |
 |-----------|------|---------|-----------|
-| `timeout_seconds` | number | `60` | máximo `120` (limites de timeout dos clientes MCP) |
+| `timeout_seconds` | number | `25` | máximo `120`. O default fica abaixo dos ~30–60 s de timeout de tool de muitos clientes MCP |
 
 Retorna `TurnEvent & { state }`:
 - `your_turn` — é sua vez e o oponente está sentado (retorna imediatamente se já for).
@@ -103,9 +119,10 @@ Retorna `TurnEvent & { state }`:
 - `takeback` — lances desfeitos; olhe o estado e continue.
 - `opponent_joined`, `new_game` — situação mudou; releia o estado.
 - `game_over` — resultado e motivo.
-- `timeout` — nada aconteceu. Texto: "Nada aconteceu em 60 s. Chame wait_for_turn de novo
-  (ou converse com o aluno)".
-- `not_seated` — chame `new_game` ou `join_game`.
+- `timeout` — nada aconteceu (é normal). Texto: "Nada aconteceu em 25 s. Chame
+  wait_for_turn de novo (ou converse com o aluno)".
+- `not_seated` — o texto manda chamar `join_game` se há partida em andamento ou assento
+  esperando, e `new_game` só se o usuário pediu uma partida nova.
 
 Eventos são enfileirados **por assento**; `wait_for_turn` drena a fila e, se houver mais
 de um evento, retorna o mais importante (`game_over` > `opponent_moved` > `your_turn` >

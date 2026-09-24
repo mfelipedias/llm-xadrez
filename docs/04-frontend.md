@@ -150,14 +150,21 @@ e tema claro.
   da página e devolução do foco a quem abriu, em zero byte de biblioteca.
 - **`ConnectWizard.tsx`** — o caminho principal de "zero → IA conectada": enquanto falta
   alguém no tabuleiro, a coluna do caderno (que estaria vazia mesmo) mostra **quatro
-  passos com detecção automática** — 1. servidor no ar (WebSocket conectado), 2. cliente
-  registrado (`server.mcpSessions` ganhou uma sessão, mesmo sem assento), 3. aula pedida no
-  chat, 4. IA na partida (a sessão sentou; o painel se fecha). O passo 2 escolhe o cliente
-  (Claude Code / Claude Desktop / Outro, lembrado em `localStorage`) e traz a URL do `/mcp`
-  com botão copiar.
+  passos com detecção automática** — 1. servidor no ar (WebSocket conectado; parado, o
+  texto diz `docker compose up -d` ou `npm start` conforme `server.runtime`), 2. cliente
+  registrado (`server.mcpSessions` tem uma sessão com `active !== false`, mesmo sem
+  assento — sessões velhas, prestes a expirar, não contam), 3. aula pedida no chat, 4. IA
+  na partida (a sessão sentou; o painel se fecha). O passo 2 escolhe o cliente (Claude
+  Code / Claude Desktop / Claude.ai e ChatGPT / Codex / Outro, lembrado em
+  `localStorage`) e traz a URL do `/mcp` com botão copiar. A frase do passo 3 muda com a
+  partida: com um assento esperando, *"entre na partida de xadrez que está esperando
+  (join_game) e jogue de pretas"*.
 - **`ConnectHelp.tsx`** — "ver todas as opções": os snippets de conexão de
   [docs/05](05-conectar-clientes.md), cada um com copiar, e um atalho para a tela
-  "Provedores" ("ou deixe o próprio servidor jogar").
+  "Provedores" ("ou deixe o próprio servidor jogar"). Os snippets dos dois componentes
+  vêm de **`web/src/connect.ts`** e dependem de `server.runtime` e `server.mcpAuth`: com
+  token, levam o marcador `<MCP_TOKEN>` (a UI nunca conhece o valor) e um aviso de que ele
+  está no `.env`.
 - **`NewGameDialog.tsx`** — **um seletor por assento** (Humano / Aguardar MCP / Bot do
   servidor), com os quatro modos antigos virando atalhos que só preenchem os seletores.
   Quando o assento é bot, entra o `BotPicker`; se o provedor for pago, um aviso inline diz
@@ -171,8 +178,19 @@ e tema claro.
   ou por orçamento.
 - **`ProvidersDialog.tsx`** — a tela **Provedores**, no botão do header (que só aparece
   quando o servidor expõe a camada). Lista os provedores com estado (● ok / ○ sem chave /
-  ✗ erro), testa a conexão, lista modelos com busca e grava `baseUrl`/`apiKeyEnv`/flags.
-  **A chave de API nunca passa por aqui**: o campo é somente leitura e mostra o que o
+  ✗ erro), testa a conexão (resultado e a **dica** do servidor em destaque no cartão),
+  lista modelos com busca, cria provedores (**"Novo provedor"**: nome, id gerado do nome,
+  tipo de API, URL base com atalhos — Ollama/LM Studio nesta máquina, com
+  `host.docker.internal` quando `runtime === "docker"`, outra máquina da rede, URL remota —,
+  variável da chave com `datalist` de `envKeys`, modo de ferramenta, local/pago, timeout em
+  segundos) e edita os existentes (campo opcional vazio vai como `null` e limpa). Salvar
+  roda o teste em seguida. Erros de campo com `aria-invalid` + `aria-describedby`, foco no
+  primeiro inválido; depois de criar, o foco vai para o título do cartão novo. Se o
+  servidor recusa com `403 admin_forbidden`, a tela pede o **token de administração**
+  (guardado em `sessionStorage`, `xadrez.adminToken`, e mandado como `Authorization:
+  Bearer` em gravação, teste e modelos) e repete a ação; sem token aceito, fica em leitura e
+  explica `ADMIN_TOKEN`/`ADMIN_ALLOW_FROM`. `canAdmin` do `GET /api/providers` mostra esse
+  estado logo ao abrir. **A chave de API nunca passa por aqui**: o campo é somente leitura e mostra o que o
   servidor devolve (`sk-or-…a1b2`); o que se edita é o *nome da variável de ambiente*.
   Perfis de bot são listados **em leitura** — não existe CRUD de perfis, e a tela diz isso:
   quem quiser mudar um perfil edita o `providers.json`.
@@ -200,7 +218,8 @@ e tema claro.
   esperar um `state` novo, para a placa não piscar.
 - `api.move`, `newGame`, `message`, `takeback`, `resign`, `draw`, `clearHighlight`;
   `api.bots.{sit,stop,resume,leave}`; `api.providers.{list,test,models,save,addPreset,remove}`.
-  Tudo com `ApiError` (`status`, `legalMoves`). **O corpo dos POSTs é ignorado**: a UI se
+  Tudo com `ApiError` (`status`, `legalMoves`, e `code`/`adminTokenAccepted`/`hint` quando
+  o servidor manda). `getAdminToken`/`setAdminToken` cuidam do token de administração. **O corpo dos POSTs é ignorado**: a UI se
   atualiza pelo broadcast WS; só o erro (4xx) é usado.
 - Em dev, Vite faz proxy de `/api`, `/ws` (ws: true) e `/mcp` para `http://localhost:3939`
   (`VITE_BACKEND` para trocar).
@@ -208,8 +227,11 @@ e tema claro.
 ### Cenários sem servidor (`?mock=…`)
 
 `web/src/dev/fixtures.ts` serve um `GameState` + `ServerInfo` completos, sem WebSocket; os
-POSTs só aparecem no console, e as rotas de leitura (`/api/providers`, modelos) devolvem
-fixture, para a tela "Provedores" poder ser vista sem backend. Úteis para ajustar CSS e
+POSTs de jogo só aparecem no console. As rotas `/api/providers*` respondem em todos os
+cenários — leitura com fixture, e gravação (PUT, preset, DELETE) numa cópia em memória, com
+teste de conexão simulado (inclusive falhas com `hint`) — para a tela "Provedores" poder
+ser vista e exercitada sem backend. `&admin=token` simula um navegador de outro computador
+com token aceito (403 até digitar qualquer token); `&admin=none`, sem token aceito. Úteis para ajustar CSS e
 para gerar capturas sempre iguais:
 
 | URL | Cenário |
@@ -221,6 +243,10 @@ para gerar capturas sempre iguais:
 | `?mock=empty` | nenhuma partida começou, os dois assentos livres |
 | `?mock=bots` | humano (brancas) vs **bot do servidor** (pretas), pensando |
 | `?mock=botsvsbots` | dois bots do servidor jogando: espectador com balões duplos |
+| `?mock=docker` | servidor em Docker com `MCP_TOKEN`: pretas esperando MCP, uma sessão inativa que não conta como conectada |
+
+Capturas desta rodada (formulário de provedor, dica de teste, token de administração,
+onboarding em Docker) em [`docs/img/conexoes/`](img/conexoes/).
 
 Qualquer outro valor cai no cenário padrão.
 

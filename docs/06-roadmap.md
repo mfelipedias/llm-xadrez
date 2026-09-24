@@ -1,6 +1,6 @@
 # 06 — Roadmap
 
-Estado em **2026-09-22**. O histórico de execução por onda/agente está em
+Estado em **2026-09-23**. O histórico de execução por onda/agente está em
 [docs/11](11-execucao.md); aqui fica o que já existe e o que vem depois.
 
 ---
@@ -55,6 +55,30 @@ doc do projeto afirma nota dele.
 no ar (o servidor `xadrez` do `.mcp.json` está com `ConnectionRefused` aqui), e os anúncios
 de leitor de tela foram conferidos pelo conteúdo das regiões `aria-live`, não com NVDA ou
 VoiceOver de verdade.
+
+## ✅ Fase 3.5 — Conexões e provedores próprios (entregue)
+
+Rodada de correções de conexão, depois de uso real com Docker e clientes diferentes.
+
+- **MCP**: token também por `?token=` (Claude.ai/ChatGPT não mandam header);
+  `wait_for_turn` com default de 25 s; `new_game` recusa apagar partida em andamento ou
+  com assento esperando sem `confirm: true`, e as instruções mandam usar `join_game`;
+  sessões ociosas fechadas em 30 min; assento de sessão viva não se toma pelo nome.
+- **Rede**: validação de `Host` em todas as rotas (`PUBLIC_URL`/`ALLOWED_HOSTS`), porta do
+  Docker em `127.0.0.1` (`BIND_ADDR`), `extra_hosts` e `env_file` no compose, `/.well-known`
+  com 404.
+- **Administração**: loopback e `ADMIN_ALLOW_FROM` sempre; de fora, `ADMIN_TOKEN`. A UI
+  pede o token quando o servidor recusa.
+- **Provedores**: "Novo provedor" na UI (servidor seu na mesma máquina, na rede ou remoto),
+  `PUT` como upsert com validação, redes locais sem chave, teste com dica ciente do
+  Docker.
+- **Onboarding**: snippets corretos por cliente e runtime (Claude Code `-s user`, Claude
+  Desktop via `mcp-remote`, Claude.ai/ChatGPT por túnel, Codex, Cursor), sem nunca mostrar
+  o token.
+
+**Pendente desta fase:** nada disto foi exercitado com Claude.ai/ChatGPT por um túnel real,
+nem contra um Ollama/LM Studio de verdade em outra máquina — a UI foi validada com
+`?mock=docker` (axe: 0 violações nos estados novos) e o servidor com os testes.
 
 ---
 

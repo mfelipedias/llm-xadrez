@@ -9,9 +9,16 @@
 | `DATA_DIR` | `./data` | persistência |
 | `LANG` | `pt-BR` | idioma dos textos gerados para a LLM. Qualquer valor começando com `en` vira `en`; o resto vira `pt-BR` (no Git Bash a variável do sistema pode vir como `en_US.UTF-8`) |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` \| `silent` |
-| `MCP_TOKEN` | (vazio) | se definido, `/mcp` exige `Authorization: Bearer <token>` |
+| `MCP_TOKEN` | (vazio) | se definido, `/mcp` exige o token: `Authorization: Bearer <token>` ou `?token=<token>` na URL. Também serve de token de administração quando `ADMIN_TOKEN` está vazio |
+| `ADMIN_TOKEN` | (vazio) | token das rotas de administração de provedores (`Authorization: Bearer`). Vazio = usa o `MCP_TOKEN` |
+| `ADMIN_ALLOW_FROM` | (vazio) | IPs/CIDRs, separados por vírgula, que administram **sem** token, além do loopback. O compose usa `172.16.0.0/12` (a ponte do Docker) |
+| `ALLOWED_HOSTS` | (vazio) | hosts extras aceitos no header `Host` (túnel, IP/nome na rede). `.dominio`/`*.dominio` = domínio e subdomínios; `*` desliga a verificação |
+| `RUNTIME` | detectado | `docker` ou `node`. Sem valor, `/.dockerenv` indica Docker. Vai para `ServerInfo.runtime` (snippets e dicas de rede na UI) |
 | `HUMAN_NAME` | `Você` | nome padrão do humano |
-| `PUBLIC_URL` | (vazio) | URL pela qual os clientes alcançam o servidor; só afeta o que é exibido/anunciado (banner, `/api/health.mcpUrl`, UI). Vazio = `http://localhost:PORT`. Use no Docker com outra porta no host ou atrás de túnel |
+| `PUBLIC_URL` | (vazio) | URL pela qual os clientes alcançam o servidor: é o que se anuncia (banner, `/api/health.mcpUrl`, UI) e o host dela entra na lista de hosts aceitos. Vazio = `http://localhost:PORT`. Use no Docker com outra porta no host ou atrás de túnel |
+
+`BIND_ADDR` não é lida pelo servidor: é do `docker-compose.yml` (endereço do host onde a
+porta é publicada, default `127.0.0.1` — docs/08).
 
 Bots do servidor (docs/09). Nada aqui é obrigatório: sem provedor configurado o projeto
 funciona exatamente como antes, só com sessões MCP.
@@ -57,7 +64,13 @@ Classe singleton, `EventEmitter`. Responsabilidades:
   - `joinGame({ sessionId, color?, name?, force? })`, `unseat(color)` (mantém o `name` no
     assento vazio), `seatForSession`, `touchSession`, `sessionOpened/Closed`, `isSessionOpen`
   - `serverInfo(version, mcpUrl): ServerInfo` — `mcpSessions[]` com `seat`, `name`,
-    `lastSeenAt` e `waiting` (true enquanto há um waiter dessa sessão). **Sessões
+    `lastSeenAt`, `waiting` (true enquanto há um waiter dessa sessão) e `active` (waiter
+    pendente ou requisição nos últimos 120 s). A UI só conta sessões com `active !== false`.
+  - `seatsWaitingForAgent()` — assentos livres esperando uma LLM: o que `join_game` sem
+    `color` escolhe e o que faz `new_game` exigir `confirm`.
+  - Retomada de assento: uma sessão `mcp` é "ida" se foi fechada ou está ociosa há mais de
+    **5 min** (`DEFAULT_SESSION_IDLE_MS`) **sem** waiter pendente — quem está em
+    `wait_for_turn` nunca é ociosa. Nome igual não retoma assento de sessão viva. **Sessões
     sintéticas de bot não entram nessa lista** (a UI mostraria "sem conexão"): o estado
     delas vai em `seat.bot` e em `ServerInfo.bots`.
   - `updateBot(color, patch): BotSeatInfo | null` — mexe só em `seat.bot` e emite **apenas**
@@ -181,16 +194,27 @@ Todas sob `/api/providers`. Sem camada de provedores, respondem `503`.
 
 | Método | Rota | Resposta / efeito |
 |--------|------|-------------------|
-| GET | `/api/providers` | `{ providers: ProviderPublic[], profiles: BotProfile[], presets: string[] }` — **nunca** a chave |
-| PUT | `/api/providers/:id` | grava `baseUrl`/`apiKeyEnv`/flags no `providers.json`. `400` se o corpo trouxer `apiKey`/`key`/`token` |
-| POST | `/api/providers/preset` | `{ preset, id? }` → adiciona um preset embutido. `409` se o id já existe |
+| GET | `/api/providers` | `ProvidersResponse`: `{ providers, profiles, presets, envKeys, canAdmin, adminTokenAccepted }` — **nunca** a chave. `envKeys` são só os **nomes** das variáveis com cara de chave presentes no ambiente (exceto `MCP_TOKEN`/`ADMIN_TOKEN`); `canAdmin` diz se *este* pedido poderia gravar |
+| PUT | `/api/providers/:id` | **cria ou atualiza** (`ProviderUpsert`). `id` casa `/^[a-z0-9][a-z0-9_-]{0,39}$/`. `null` ou `""` limpa `baseUrl`/`apiKeyEnv`/`timeoutMs`. Validação: `kind` `openai`\|`anthropic` (OpenAI exige `baseUrl`); `baseUrl` `http(s)` sem `usuário:senha@` (barras finais removidas); `apiKeyEnv` casa `/^[A-Z_][A-Z0-9_]*$/`, termina em `_API_KEY`/`_KEY`/`_TOKEN` e não é `MCP_TOKEN`/`ADMIN_TOKEN`; `timeoutMs` 1000–600000; nome vazio vira o id. `400` se o corpo trouxer `apiKey`/`key`/`token`/`authorization` ou `extraHeaders`. Responde o `ProviderPublic` |
+| POST | `/api/providers/preset` | `{ preset, id? }` → adiciona um preset embutido. Sem `id`, escolhe um livre (`ollama-2`…) em vez de `409`; com `id` repetido, `409`. Responde o `ProviderPublic` |
 | DELETE | `/api/providers/:id` | remove. `409` se um bot da partida atual usa esse provedor; `404` se não existe |
-| POST | `/api/providers/:id/test` | `{ ok, latencyMs, models }` ou `502 { ok: false, error }` (texto curto, sem corpo bruto) |
-| GET | `/api/providers/:id/models` | `ModelInfo[]`, cache de 5 min; `?refresh=1` força |
+| POST | `/api/providers/:id/test` | `ProviderTestResponse`: `{ ok: true, latencyMs, models? }` ou `502 { ok: false, error, hint? }`. Timeout de 10 s. `hint` é uma dica acionável em pt-BR, ciente do Docker (`host.docker.internal`, `OLLAMA_HOST=0.0.0.0`, "Serve on Local Network", `extra_hosts`…) |
+| GET | `/api/providers/:id/models` | `ModelInfo[]`, cache de 5 min; `?refresh=1` força. Timeout de 20 s; falha = `502 ApiError { error, hint? }` |
 
-As três que **gravam** (`PUT`, `POST /preset`, `DELETE`) passam por `canAdmin()`: com
-`MCP_TOKEN` definido exigem `Authorization: Bearer <token>`; sem ele, só aceitam
-requisições de `localhost`. **Não existe CRUD de perfis de bot** (`/api/profiles`): perfis
+Todas menos o `GET /api/providers` são de **administração** (`requireAdmin()`), aceitas:
+do loopback e dos IPs/CIDRs de `ADMIN_ALLOW_FROM` **sempre** (mesmo com token definido);
+de qualquer outro endereço, só com `Authorization: Bearer <ADMIN_TOKEN>` (ou `MCP_TOKEN`
+se `ADMIN_TOKEN` está vazio; comparação em tempo constante). Recusa: `403 ApiError { error,
+code: "admin_forbidden", adminTokenAccepted }` — com `adminTokenAccepted` a UI pede o token
+e repete; sem ele, explica o `.env`. O teste e a listagem são administrativos porque fazem o
+servidor abrir conexões para a `baseUrl` configurada.
+
+Provedor **local** (não exige chave): `baseUrl` em loopback, rede privada ou link-local
+(`10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `169.254/16`), `*.local`, `*.lan`,
+`*.internal`, `*.home.arpa`, `host.docker.internal` ou nome sem ponto (serviço do compose)
+— salvo `local: false` explícito.
+
+**Não existe CRUD de perfis de bot** (`/api/profiles`): perfis
 se editam no `providers.json`, ou se escolhe `providerId` + `model` direto no pedido de
 assento.
 
@@ -217,7 +241,7 @@ scripts e depuração).
 
 | Método | Rota | Body | Resposta / efeito |
 |--------|------|------|--------|
-| GET | `/api/health` | — | `{ ok: true, version, mcpUrl, mcpSessions[] }` (`mcpSessions` = `ServerInfo.mcpSessions`, com `waiting`) |
+| GET | `/api/health` | — | `{ ok: true, version, mcpUrl, mcpSessions[] }` (`mcpSessions` = `ServerInfo.mcpSessions`, com `waiting` e `active`) |
 | GET | `/api/state` | — | `GameState` |
 | POST | `/api/game` | `NewGameRequest` | `GameState`. Ver abaixo |
 | POST | `/api/move` | `MoveRequest` | `GameState`. Lance pelo assento humano da vez. 400 se a partida não está `active`, se não é vez de humano ou se o lance é ilegal (`legalMoves` no erro) |
@@ -274,7 +298,15 @@ anterior parar.
     permite keep-alive. Se der problema com algum cliente, tornar configurável.
   - `POST` sem `Mcp-Session-Id` que não seja `initialize` → 400; com id desconhecido → 404
     ("Session not found: reconnect"). `GET`/`DELETE` exigem id conhecido.
-  - Se `MCP_TOKEN` definido, middleware valida o header antes de tudo (401 + `WWW-Authenticate`).
+  - Se `MCP_TOKEN` definido, middleware valida o token antes de tudo — header
+    `Authorization: Bearer` **ou** query `?token=` (para Claude.ai/ChatGPT, que não mandam
+    header). Falhou: `401` + `WWW-Authenticate`, com a mensagem `Unauthorized: missing or
+    invalid token (use 'Authorization: Bearer <MCP_TOKEN>' or '?token=<MCP_TOKEN>' in the URL)`.
+  - **Expiração**: uma varredura fecha as sessões sem requisição há **30 min**
+    (`DEFAULT_MCP_SESSION_IDLE_MS`), exceto as que têm `wait_for_turn` pendente. O cliente
+    da sessão varrida recebe `404 Session not found: reconnect (initialize) to start a new
+    session` e precisa reinicializar; um `initialize` que chega com um id velho é aceito e
+    abre sessão nova.
   - Durante `wait_for_turn`, se o cliente mandou `progressToken`, envia `notifications/progress`
     a cada 10 s (`progressIntervalMs`, 0 desliga). O `AbortSignal` da requisição cancela a
     espera (resposta `timeout`).
@@ -285,12 +317,19 @@ anterior parar.
   CallToolResult` para facilitar testes sem transporte.
 
 ## Bootstrap (`server/src/index.ts`)
-1. `const app = createMcpExpressApp({ host })` (já inclui `express.json()`).
+1. `express()` com `hostValidationMiddleware` (`server/src/mcp/guards.ts`) antes de tudo e
+   `express.json()`. A validação de `Host` vale para **todas** as rotas e para o upgrade do
+   `/ws`, em qualquer bind: aceita loopback, o host da `PUBLIC_URL`, o host do bind (se não
+   for `0.0.0.0`) e `ALLOWED_HOSTS`; o resto recebe `403 { error: "Host não permitido: …" }`
+   dizendo o que pôr no `.env`. Substitui a do `createMcpExpressApp` do SDK, que em
+   `0.0.0.0` (Docker) não protegia e em `127.0.0.1` recusava o host de um túnel.
    Antes disso: `GameStore`, `attachPersistence`, `ProviderRegistry` (mais o provedor
    `fake` se `BOT_FAKE_PROVIDER`) e `BotManager`. O `serverInfo()` junta
    `store.serverInfo()` com `providers`, `profiles` e `bots`.
-2. Monta `/api` (com `registry` e `bots` nas dependências; `adminToken` = `MCP_TOKEN`
-   quando definido) e `/mcp`. Logo depois, `bots.autoResume()` se `BOT_AUTORESUME`.
+2. Monta `/api` (com `registry` e `bots` nas dependências; `adminToken` = `ADMIN_TOKEN` ou,
+   vazio, `MCP_TOKEN`; `adminAllowFrom`; `inDocker`) e `/mcp`. Logo depois,
+   `bots.autoResume()` se `BOT_AUTORESUME`. `/.well-known/*` responde `404` JSON — clientes
+   que tentam descoberta OAuth recebem "não há OAuth" em vez do `index.html` da SPA com 200.
 3. Se `web/dist/index.html` existe (independente de `NODE_ENV`): `express.static("web/dist")` +
    fallback `index.html` para `GET` que aceita HTML. Senão, `GET /` mostra uma página
    placeholder com as instruções de build e o endpoint MCP.
@@ -300,7 +339,9 @@ anterior parar.
 
 ## Testes (`server/test/*.test.ts`, vitest)
 
-`npm test` — **192 testes em 9 arquivos**. Nenhum toca a rede: os provedores entram
+`npm test` — a contagem abaixo é da Fase 2 (**192 testes em 9 arquivos**); esta rodada
+acrescentou `mcp-http.test.ts` (token por header/query, expiração de sessão, `Host`) e os
+`gateway-*.test.ts` (validação de provedor, redes locais, admin, dicas de diagnóstico). Nenhum toca a rede: os provedores entram
 mockados (`fetch` falso, SDK falso) ou pelo `FakeProvider` determinístico.
 
 - `store.test.ts` (38): nova partida, lance humano/mcp/bot, lance ilegal com `legalMoves`,

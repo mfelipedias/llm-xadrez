@@ -27,12 +27,14 @@ docker compose up -d --build # http://localhost:3939, dados em ./data (ver docs/
 ```
 
 **Com um cliente MCP:** o endpoint é `http://localhost:3939/mcp`. Como conectar Claude Code
-/ Claude Desktop / Jan / Codex / ChatGPT / outros:
-[docs/05](docs/05-conectar-clientes.md). No chat: *"vamos jogar xadrez, eu de brancas, me
-ensine enquanto jogamos"*.
+/ Claude Desktop / Claude.ai / ChatGPT / Codex / Jan / outros:
+[docs/05](docs/05-conectar-clientes.md) — a própria UI mostra o comando do seu cliente. No
+chat: *"vamos jogar xadrez, eu de brancas, me ensine enquanto jogamos"* (ou, se a partida
+já está esperando a IA, *"entre na partida de xadrez que está esperando (join_game)"*).
 
-**Com um bot do servidor:** ponha a chave no `.env` (ou suba um modelo local), confira no
-botão **Provedores** do header e escolha "Bot do servidor" no assento em *Nova partida*.
+**Com um bot do servidor:** ponha a chave no `.env` (ou suba um modelo local — nesta
+máquina, em outra da rede ou um servidor seu com chave), confira ou cadastre no botão
+**Provedores** do header e escolha "Bot do servidor" no assento em *Nova partida*.
 Passo a passo: [docs/05 → "Ou use um bot do servidor"](docs/05-conectar-clientes.md#ou-use-um-bot-do-servidor).
 
 ```bash
@@ -138,5 +140,10 @@ Capturas da interface daquele momento: [`ui.png`](docs/img/ui.png),
   modelo escreve.
 - O custo em dólares do adaptador Anthropic é **estimado** por uma tabela local de preços
   (a Messages API não devolve custo).
+- Claude.ai, ChatGPT e o "custom connector" do Claude Desktop chamam o servidor da nuvem:
+  exigem túnel HTTPS, `PUBLIC_URL`/`ALLOWED_HOSTS` e o token na URL (`?token=`), e esse
+  caminho não foi testado de ponta a ponta com um túnel real.
+- Abrir a UI de outro aparelho da rede exige configurar `HOST`/`BIND_ADDR`,
+  `ALLOWED_HOSTS` e, para administrar provedores de lá, `ADMIN_TOKEN` (docs/05).
 - Em automação, o `drag` de uma peça precisa de eventos de ponteiro em passos — use
   clique-clique ou o teclado ([docs/04](docs/04-frontend.md)).

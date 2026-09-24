@@ -36,7 +36,7 @@ WebSocket e acorda quem estiver bloqueado em `wait_for_turn`.
 |--------|---------|--------|
 | Runtime | Node 24, TypeScript, ESM | já instalado na máquina; `tsx` roda TS direto, sem build do servidor |
 | Regras de xadrez | `chess.js` 1.x | validação de lances, SAN/UCI, FEN, PGN, detecção de fim de jogo |
-| HTTP | `express` 5 (via `createMcpExpressApp` do SDK) | o SDK do MCP já traz Express com proteção DNS-rebinding |
+| HTTP | `express` 5 | validação própria do header `Host` (DNS rebinding) em todas as rotas, `server/src/mcp/guards.ts` — a do `createMcpExpressApp` do SDK não protegia em `0.0.0.0` nem aceitava túnel |
 | MCP | `@modelcontextprotocol/sdk` 1.30 (`McpServer` + `StreamableHTTPServerTransport`) | transporte recomendado; sessões com estado |
 | Schemas | `zod` 4 | exigido pelo SDK para `inputSchema`/`outputSchema` |
 | Tempo real | `ws` 8 | WebSocket simples para o navegador |
@@ -146,19 +146,36 @@ Um único `package.json` na raiz para simplificar: `npm install` uma vez, `npm r
 
 ## Segurança (escopo local)
 
-- Bind padrão em `127.0.0.1`. `createMcpExpressApp` aplica proteção contra DNS rebinding.
-- Sem autenticação. Para expor via túnel (ngrok/cloudflared), configurar `MCP_TOKEN` no
-  `.env`: o servidor exige `Authorization: Bearer <token>` em `/mcp` quando definido.
+- Bind padrão em `127.0.0.1` (no Docker, a porta é publicada em `127.0.0.1` via
+  `BIND_ADDR`). Abrir para a rede é uma decisão explícita.
+- **Header `Host` validado em todas as rotas** (UI, `/api`, `/ws`, `/mcp`), em qualquer
+  bind: só loopback, o host da `PUBLIC_URL` e `ALLOWED_HOSTS` passam (proteção contra DNS
+  rebinding). Túnel ou IP da rede precisam estar nessa lista.
+- `/mcp` sem autenticação por padrão. Para expor (túnel, rede), `MCP_TOKEN` no `.env`: o
+  servidor exige `Authorization: Bearer <token>` ou `?token=<token>` na URL. O token na
+  URL existe para Claude.ai/ChatGPT, que não mandam header; é mais fraco (fica salvo na
+  configuração do conector e pode aparecer em logs de proxy).
+- Sessões MCP ociosas há 30 min são fechadas; um assento de sessão viva não é tomado só
+  pelo nome.
+- A UI (`/`) não tem senha. O que ela pode fazer de perigoso — gravar `providers.json`,
+  testar e listar modelos (o servidor abre conexão para a `baseUrl`) — é
+  **administração**: aceita do loopback e de `ADMIN_ALLOW_FROM` (no compose,
+  `172.16.0.0/12`, a ponte do Docker), ou com `Authorization: Bearer <ADMIN_TOKEN>` (ou
+  `MCP_TOKEN`). O mais é `403 admin_forbidden`. O token digitado na UI fica só no
+  `sessionStorage` da aba.
 - Nada de `eval`, nada de execução de código vindo das tools.
 - **Chaves de API só no ambiente.** `providers.json` guarda apenas o *nome* da variável
-  (`apiKeyEnv`); `ProviderConfig` não tem campo de chave. A API nunca devolve uma
-  (`hasApiKey` + `apiKeyMasked`) nem aceita uma no corpo — a UI é servida sem autenticação,
-  e aceitar chave por ali a transformaria num canal de exfiltração. As rotas que gravam
-  `providers.json` só respondem a `localhost`, ou ao `MCP_TOKEN` quando ele existe.
+  (`apiKeyEnv`), que precisa terminar em `_API_KEY`/`_KEY`/`_TOKEN` e não pode ser
+  `MCP_TOKEN`/`ADMIN_TOKEN` (senão bastaria apontar um provedor para um segredo do
+  servidor e mandá-lo para uma URL qualquer). `ProviderConfig` não tem campo de chave; a
+  API nunca devolve uma (`hasApiKey` + `apiKeyMasked`) nem aceita uma no corpo (`apiKey`,
+  `key`, `token`, `authorization`, `extraHeaders` → `400`) — aceitar chave pela UI a
+  transformaria num canal de exfiltração. `envKeys` expõe só **nomes** de variáveis.
 - Todo texto logado passa por `redact()` (`sk-…`, `Bearer …`, `x-api-key`), e a resposta
   bruta do provedor nunca é persistida.
 - Um bot só fala com o `baseUrl` da config: a UI não consegue apontar o servidor para uma
-  URL arbitrária sem passar pelas rotas administrativas acima.
+  URL arbitrária sem passar pelas rotas administrativas acima. `baseUrl` com
+  `usuário:senha@` é recusada.
 
 ## Decisões registradas
 
