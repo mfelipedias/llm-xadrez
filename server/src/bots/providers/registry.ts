@@ -16,7 +16,15 @@ import type { BotProfile, ModelInfo, ProviderPublic } from "../../../../shared/t
 import { createLogger } from "../../log.js";
 import { createAnthropicProvider, type AnthropicOptions } from "./anthropic.js";
 import { createOpenAiCompatProvider, type FetchLike } from "./openai-compat.js";
-import { ProviderError, type ChatProvider, type ProviderConfig, type TestResult } from "./types.js";
+import { diagnoseProviderError, type Diagnosis } from "./diagnose.js";
+import {
+  MODELS_TIMEOUT_MS,
+  ProviderError,
+  isEffectivelyLocal,
+  type ChatProvider,
+  type ProviderConfig,
+  type TestResult,
+} from "./types.js";
 
 const log = createLogger("providers");
 
@@ -30,10 +38,28 @@ export interface ProvidersFile {
   };
 }
 
-/** Campos aceitos em `PUT /api/providers/:id` (nunca `apiKey`). */
-export type ProviderPatch = Partial<Omit<ProviderConfig, "id">>;
+/**
+ * Campos aceitos em `PUT /api/providers/:id` (nunca `apiKey`). `null` (ou "") remove o
+ * campo da config — ex.: `timeoutMs: null` volta ao default, `apiKeyEnv: null` tira a chave.
+ */
+export type ProviderPatch = { [K in keyof Omit<ProviderConfig, "id">]?: ProviderConfig[K] | null };
 
 const MODELS_CACHE_MS = 5 * 60 * 1000;
+/** Listagem de modelos pela UI: mais folga que o teste de conexão, bem menos que o chat. */
+const MODELS_LIST_TIMEOUT_MS = 20_000;
+
+/** Variáveis com cara de chave que a UI pode sugerir como `apiKeyEnv`. */
+export const KEY_ENV_PATTERN = /(_API_KEY|_KEY|_TOKEN)$/;
+/** Segredos do próprio servidor: nunca listados nem aceitos como `apiKeyEnv`. */
+export const RESERVED_ENV_KEYS = new Set(["MCP_TOKEN", "ADMIN_TOKEN"]);
+
+/** Falha ao gravar `providers.json` (pasta no lugar do arquivo, permissão...). Vira 500 na API. */
+export class ProvidersFileError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ProvidersFileError";
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /* Presets (docs/09, seção 4.1)                                        */
@@ -169,9 +195,31 @@ function sanitizeConfig(cfg: Record<string, unknown>): ProviderConfig {
   return copy as unknown as ProviderConfig;
 }
 
-function isLocalUrl(url: string | undefined): boolean {
-  if (!url) return false;
-  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:|\/|$)/i.test(url);
+/** Mensagem de erro de gravação de `providers.json`, pronta para a UI. */
+function describeWriteError(file: string, err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === "EISDIR") return isDirMessage(file);
+  if (code === "EACCES" || code === "EPERM") {
+    return `Sem permissão para gravar ${file}. No Docker, confira o dono do arquivo no host (o container roda como UID:GID do .env).`;
+  }
+  if (code === "EROFS") return `${file} está montado como somente leitura: remova o ":ro" do volume para a tela de provedores poder gravar.`;
+  return `Não foi possível gravar ${file}${typeof code === "string" ? ` (${code})` : ""}: ${(err as Error)?.message ?? String(err)}`;
+}
+
+function isDirMessage(file: string): string {
+  return (
+    `${file} é uma pasta, não um arquivo — o Docker cria uma pasta quando o arquivo do volume ` +
+    "não existe no host. Pare o container, apague a pasta ./providers.json, restaure o arquivo " +
+    "(git checkout providers.json) e suba de novo."
+  );
+}
+
+function isDirectory(file: string): boolean {
+  try {
+    return fs.statSync(file).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -219,6 +267,10 @@ export class ProviderRegistry {
   /* ------------------------------ arquivo ----------------------------- */
 
   private read(): ProvidersFile {
+    if (this.file && isDirectory(this.file)) {
+      log.warn(`${isDirMessage(this.file)} Usando presets embutidos (alterações não serão gravadas).`);
+      return defaultProvidersFile();
+    }
     if (!this.file || !fs.existsSync(this.file)) {
       if (this.file) log.info(`providers.json não encontrado em ${this.file}: usando presets embutidos`);
       return defaultProvidersFile();
@@ -252,18 +304,41 @@ export class ProviderRegistry {
     return this.data.providers.filter((p) => !this.injected.has(p.id));
   }
 
-  /** Grava `providers.json`. Nunca escreve chaves (as configs não as têm). */
+  /**
+   * Grava `providers.json`. Nunca escreve chaves (as configs não as têm).
+   * Lança `ProvidersFileError` (mensagem pt-BR pronta) se o caminho não for gravável.
+   */
   save(): void {
     if (!this.file || this.readOnly) return;
+    if (isDirectory(this.file)) throw new ProvidersFileError(isDirMessage(this.file));
     const payload: ProvidersFile = {
       version: this.data.version || 1,
       providers: this.persistable().map((p) => sanitizeConfig(p as unknown as Record<string, unknown>)),
       profiles: this.data.profiles,
     };
     if (this.data.defaults) payload.defaults = this.data.defaults;
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(this.file, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+      fs.writeFileSync(this.file, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    } catch (err) {
+      const message = describeWriteError(this.file, err);
+      log.error(message);
+      throw new ProvidersFileError(message, { cause: err });
+    }
     log.info(`providers.json gravado (${payload.providers.length} provedor(es))`);
+  }
+
+  /** Aplica uma mudança e grava; se a gravação falhar, desfaz a mudança em memória. */
+  private mutate<T>(change: () => T): T {
+    const snapshot = clone(this.data);
+    const result = change();
+    try {
+      this.save();
+    } catch (err) {
+      this.data = snapshot;
+      throw err;
+    }
+    return result;
   }
 
   /** Conteúdo serializado que iria para o disco (usado nos testes de segurança). */
@@ -308,7 +383,7 @@ export class ProviderRegistry {
   missingKeyReason(id: string): string | null {
     const cfg = this.data.providers.find((p) => p.id === id);
     if (!cfg) return `Provedor "${id}" não existe.`;
-    if (cfg.local || !cfg.apiKeyEnv) return null;
+    if (isEffectivelyLocal(cfg) || !cfg.apiKeyEnv) return null;
     if (this.apiKey(id)) return null;
     return `Provedor ${id} sem ${cfg.apiKeyEnv} no .env`;
   }
@@ -321,11 +396,15 @@ export class ProviderRegistry {
       kind: cfg.kind,
       hasApiKey: !!key,
       toolMode: cfg.toolMode ?? "native",
-      local: cfg.local ?? isLocalUrl(cfg.baseUrl),
+      local: isEffectivelyLocal(cfg),
       paid: cfg.paid ?? false,
     };
     if (cfg.baseUrl) pub.baseUrl = cfg.baseUrl;
     if (cfg.apiKeyEnv) pub.apiKeyEnv = cfg.apiKeyEnv;
+    if (cfg.timeoutMs !== undefined) pub.timeoutMs = cfg.timeoutMs;
+    // Configs antigas não gravavam `preset`: o id igual ao de um preset basta como pista.
+    const preset = cfg.preset ?? (PRESETS[cfg.id] ? cfg.id : undefined);
+    if (preset) pub.preset = preset;
     if (key) pub.apiKeyMasked = maskKey(key);
     const test = this.lastTest.get(cfg.id);
     if (test) pub.lastTest = test;
@@ -336,45 +415,79 @@ export class ProviderRegistry {
     return this.data.providers.map((p) => this.toPublic(p));
   }
 
+  /**
+   * Cria ou atualiza. `null`/"" num campo do patch remove o campo (volta ao default).
+   * A validação de formato (id, URL, enum) é do chamador (`validateProviderUpsert`).
+   */
   upsert(id: string, patch: ProviderPatch): ProviderConfig {
-    const clean = sanitizeConfig({ ...patch } as Record<string, unknown>) as ProviderPatch;
-    const index = this.data.providers.findIndex((p) => p.id === id);
-    if (index < 0) {
-      const created: ProviderConfig = {
-        id,
-        name: clean.name ?? id,
-        kind: clean.kind ?? "openai",
-        ...clean,
-      };
-      this.data.providers.push(created);
-    } else {
-      this.data.providers[index] = { ...this.data.providers[index], ...clean, id };
-    }
+    const clean = sanitizeConfig({ ...patch } as Record<string, unknown>) as unknown as Record<string, unknown>;
+    delete clean.id;
+    this.mutate(() => {
+      const index = this.data.providers.findIndex((p) => p.id === id);
+      const current: Record<string, unknown> =
+        index < 0 ? { id, name: id, kind: "openai" } : { ...(this.data.providers[index] as unknown as Record<string, unknown>) };
+      for (const [key, value] of Object.entries(clean)) {
+        if (value === undefined) continue;
+        if (value === null || value === "") delete current[key];
+        else current[key] = value;
+      }
+      if (typeof current.name !== "string" || !current.name.trim()) current.name = id;
+      if (current.kind !== "anthropic") current.kind = "openai";
+      const next = current as unknown as ProviderConfig;
+      if (index < 0) this.data.providers.push(next);
+      else this.data.providers[index] = next;
+    });
     this.adapters.delete(id);
     this.modelsCache.delete(id);
-    this.save();
+    this.lastTest.delete(id);
     return clone(this.data.providers.find((p) => p.id === id) as ProviderConfig);
   }
 
-  addPreset(preset: string, id = preset): ProviderConfig {
+  /** Próximo id livre a partir de `base`: "custom", "custom-2", "custom-3"... */
+  freeId(base: string): string {
+    if (!this.has(base)) return base;
+    for (let n = 2; ; n++) {
+      const candidate = `${base}-${n}`;
+      if (!this.has(candidate)) return candidate;
+    }
+  }
+
+  /**
+   * Adiciona um provedor a partir de um preset. Com `id` explícito, colisão é erro; sem ele,
+   * o id é o do preset com sufixo numérico se já existir (`custom-2`).
+   */
+  addPreset(preset: string, id?: string): ProviderConfig {
     const base = PRESETS[preset];
     if (!base) throw new ProviderError(`Preset "${preset}" não existe.`, { providerId: preset });
-    if (this.has(id)) throw new ProviderError(`Já existe um provedor com id "${id}".`, { providerId: id });
-    const cfg = { ...clone(base), id };
-    this.data.providers.push(cfg);
-    this.save();
+    const finalId = id ?? this.freeId(preset);
+    if (this.has(finalId)) throw new ProviderError(`Já existe um provedor com id "${finalId}".`, { providerId: finalId });
+    const cfg: ProviderConfig = { ...clone(base), id: finalId, preset };
+    this.mutate(() => {
+      this.data.providers.push(cfg);
+    });
     return clone(cfg);
   }
 
   remove(id: string): boolean {
     const index = this.data.providers.findIndex((p) => p.id === id);
     if (index < 0) return false;
-    this.data.providers.splice(index, 1);
+    this.mutate(() => {
+      this.data.providers.splice(index, 1);
+    });
     this.adapters.delete(id);
     this.modelsCache.delete(id);
     this.lastTest.delete(id);
-    this.save();
     return true;
+  }
+
+  /**
+   * NOMES (nunca valores) das variáveis de ambiente com cara de chave, definidas e não
+   * vazias, exceto os segredos do próprio servidor. A UI sugere como `apiKeyEnv`.
+   */
+  envKeyNames(): string[] {
+    return Object.keys(this.env)
+      .filter((name) => KEY_ENV_PATTERN.test(name) && !RESERVED_ENV_KEYS.has(name) && !!this.env[name]?.trim())
+      .sort();
   }
 
   /* ------------------------------ perfis ------------------------------ */
@@ -389,18 +502,20 @@ export class ProviderRegistry {
   }
 
   upsertProfile(profile: BotProfile): BotProfile {
-    const index = this.data.profiles.findIndex((p) => p.id === profile.id);
-    if (index < 0) this.data.profiles.push(profile);
-    else this.data.profiles[index] = { ...this.data.profiles[index], ...profile };
-    this.save();
+    this.mutate(() => {
+      const index = this.data.profiles.findIndex((p) => p.id === profile.id);
+      if (index < 0) this.data.profiles.push(profile);
+      else this.data.profiles[index] = { ...this.data.profiles[index], ...profile };
+    });
     return clone(profile);
   }
 
   removeProfile(id: string): boolean {
     const index = this.data.profiles.findIndex((p) => p.id === id);
     if (index < 0) return false;
-    this.data.profiles.splice(index, 1);
-    this.save();
+    this.mutate(() => {
+      this.data.profiles.splice(index, 1);
+    });
     return true;
   }
 
@@ -450,12 +565,25 @@ export class ProviderRegistry {
     return adapter;
   }
 
-  async test(id: string): Promise<TestResult> {
+  /** Erro de uma chamada ao provedor → mensagem + dica (ciente do Docker). */
+  diagnose(id: string, err: unknown, opts: { inDocker?: boolean; timeoutMs?: number } = {}): Diagnosis {
+    const cfg = this.data.providers.find((p) => p.id === id) ?? { id, kind: "openai" as const };
+    return diagnoseProviderError(err, cfg, opts);
+  }
+
+  /**
+   * Teste de conexão: `GET /models` com timeout curto (MODELS_TIMEOUT_MS), independente do
+   * `timeoutMs` do chat. Erros viram mensagem + `hint`; o resultado fica em `lastTest`.
+   */
+  async test(id: string, opts: { inDocker?: boolean } = {}): Promise<TestResult> {
     let result: TestResult;
+    const started = this.now();
     try {
-      result = await this.provider(id).test();
+      const models = await this.provider(id).listModels({ timeoutMs: MODELS_TIMEOUT_MS });
+      result = { ok: true, latencyMs: Math.max(0, this.now() - started), models: models.length };
     } catch (err) {
-      result = { ok: false, error: err instanceof ProviderError ? err.shortText : (err as Error).message };
+      const diag = this.diagnose(id, err, { inDocker: opts.inDocker, timeoutMs: MODELS_TIMEOUT_MS });
+      result = diag.hint ? { ok: false, error: diag.error, hint: diag.hint } : { ok: false, error: diag.error };
     }
     const at = new Date(this.now()).toISOString();
     this.lastTest.set(id, result.ok ? { ok: true, at, latencyMs: result.latencyMs, models: result.models } : { ok: false, at, error: result.error });
@@ -465,7 +593,7 @@ export class ProviderRegistry {
   async models(id: string, refresh = false): Promise<ModelInfo[]> {
     const cached = this.modelsCache.get(id);
     if (!refresh && cached && this.now() - cached.at < MODELS_CACHE_MS) return cached.models;
-    const models = await this.provider(id).listModels();
+    const models = await this.provider(id).listModels({ timeoutMs: MODELS_LIST_TIMEOUT_MS });
     this.modelsCache.set(id, { at: this.now(), models });
     return models;
   }

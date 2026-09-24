@@ -412,6 +412,8 @@ export interface ApiError {
    */
   code?: "admin_forbidden";
   adminTokenAccepted?: boolean;
+  /** Dica acionável em pt-BR (ex.: erro de rede ao listar modelos de um provedor). */
+  hint?: string;
 }
 
 /* ---------- Eventos entregues a quem espera em wait_for_turn ---------- */

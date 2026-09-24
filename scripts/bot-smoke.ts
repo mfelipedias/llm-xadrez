@@ -30,6 +30,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { PRESETS } from "../server/src/bots/providers/registry.js";
+import { isEffectivelyLocal } from "../server/src/bots/providers/types.js";
 import type { BotProfile, GameState, ProviderPublic } from "../shared/types.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -208,7 +209,7 @@ async function preflight(): Promise<Preflight> {
     return { ok: false, reason: `"${PROVIDER}" não é um preset conhecido (${Object.keys(PRESETS).join(", ")})` };
   }
 
-  if (preset.local) {
+  if (isEffectivelyLocal(preset)) {
     const url = `${(preset.baseUrl ?? "").replace(/\/+$/, "")}/models`;
     const ids = await fetchIds(url);
     if (!ids) return { ok: false, reason: `nada respondeu em GET ${url} — suba o servidor local e carregue um modelo` };

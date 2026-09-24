@@ -21,7 +21,7 @@ interface Harness {
 
 let harness: Harness | null = null;
 
-async function start(extra: Partial<ApiDeps> = {}): Promise<Harness> {
+async function start(extra: Partial<ApiDeps> = {}, opts: { trustProxy?: boolean } = {}): Promise<Harness> {
   const store = new GameStore({ defaultHumanName: "Felipe" });
   const registry = new ProviderRegistry({
     env: { OPENROUTER_API_KEY: "sk-or-v1-0123456789abcdef-a1b2" },
@@ -38,6 +38,8 @@ async function start(extra: Partial<ApiDeps> = {}): Promise<Harness> {
   });
 
   const app = express();
+  // Testes de admin simulam um IP remoto com X-Forwarded-For.
+  if (opts.trustProxy) app.set("trust proxy", true);
   app.use(express.json());
   app.use(
     "/api",
@@ -228,8 +230,12 @@ describe("/api/providers", () => {
     const added = await post(base, "/api/providers/preset", { preset: "jan" });
     expect(added.status).toBe(200);
     expect(added.json.id).toBe("jan");
+    // Sem id explícito, a colisão ganha sufixo; com id explícito, 409.
     const duplicado = await post(base, "/api/providers/preset", { preset: "jan" });
-    expect(duplicado.status).toBe(409);
+    expect(duplicado.status).toBe(200);
+    expect(duplicado.json.id).toBe("jan-2");
+    const explicito = await post(base, "/api/providers/preset", { preset: "jan", id: "jan" });
+    expect(explicito.status).toBe(409);
     const invalido = await post(base, "/api/providers/preset", { preset: "inexistente" });
     expect(invalido.status).toBe(400);
 
@@ -256,13 +262,23 @@ describe("/api/providers", () => {
     expect(res.status).toBe(409);
   });
 
-  it("com MCP_TOKEN, escrita exige o Bearer", async () => {
-    const { base } = await start({ adminToken: "segredo" });
-    const semToken = await post(base, "/api/providers/preset", { preset: "jan" });
+  it("fora do loopback/ADMIN_ALLOW_FROM, escrita exige o Bearer do ADMIN_TOKEN", async () => {
+    const { base } = await start({ adminToken: "segredo" }, { trustProxy: true });
+    const remote = { "x-forwarded-for": "203.0.113.9" };
+    const semToken = await post(base, "/api/providers/preset", { preset: "jan" }, { headers: remote });
     expect(semToken.status).toBe(403);
-    const comToken = await post(base, "/api/providers/preset", { preset: "jan" }, { headers: { authorization: "Bearer segredo" } });
+    expect(semToken.json).toMatchObject({ code: "admin_forbidden", adminTokenAccepted: true });
+    const errado = await post(base, "/api/providers/preset", { preset: "jan" }, { headers: { ...remote, authorization: "Bearer outro" } });
+    expect(errado.status).toBe(403);
+    const comToken = await post(base, "/api/providers/preset", { preset: "jan" }, { headers: { ...remote, authorization: "Bearer segredo" } });
     expect(comToken.status).toBe(200);
     // Leitura continua livre.
     expect((await get(base, "/api/providers")).status).toBe(200);
+  });
+
+  it("loopback administra sem token mesmo com ADMIN_TOKEN definido", async () => {
+    const { base } = await start({ adminToken: "segredo" });
+    const res = await post(base, "/api/providers/preset", { preset: "jan" });
+    expect(res.status).toBe(200);
   });
 });

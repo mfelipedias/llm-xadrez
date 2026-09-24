@@ -21,7 +21,10 @@ import type { ModelInfo } from "../../../../shared/types.js";
 import { createLogger } from "../../log.js";
 import {
   ProviderError,
+  MODELS_TIMEOUT_MS,
   defaultTimeoutMs,
+  isEffectivelyLocal,
+  type ListModelsOptions,
   type ChatMessage,
   type ChatProvider,
   type ChatRequest,
@@ -443,7 +446,17 @@ export interface AnthropicOptions {
   now?: () => number;
   /** Testes: SDK já pronto (pula o import dinâmico e a exigência de chave). */
   client?: AnthropicClientLike;
+  /** Testes: construtor no lugar do `@anthropic-ai/sdk` (para inspecionar as opções). */
+  sdk?: AnthropicSdkConstructor;
 }
+
+/** Construtor do client (`new Anthropic({ apiKey, baseURL, timeout, maxRetries })`). */
+export type AnthropicSdkConstructor = new (options: {
+  apiKey: string;
+  maxRetries: number;
+  timeout: number;
+  baseURL?: string;
+}) => unknown;
 
 /** Modelos conhecidos enriquecem o que a API devolve (contexto e preço). */
 function enrichModels(list: unknown[]): ModelInfo[] {
@@ -479,26 +492,33 @@ export function createAnthropicProvider(cfg: ProviderConfig, opts: AnthropicOpti
     if (opts.client) return opts.client;
     if (!clientPromise) {
       clientPromise = (async () => {
-        const apiKey = opts.apiKey?.trim();
+        // Gateway local compatível com a Messages API aceita chave vazia: mandamos um valor
+        // qualquer, como no adaptador OpenAI-compatível.
+        const apiKey = opts.apiKey?.trim() || (isEffectivelyLocal(cfg) ? "local" : "");
         if (!apiKey) {
           throw new ProviderError(
             `Provedor ${cfg.id} sem ${cfg.apiKeyEnv ?? "ANTHROPIC_API_KEY"} no .env`,
             { providerId: cfg.id, status: 401 },
           );
         }
-        let mod: typeof import("@anthropic-ai/sdk");
-        try {
-          mod = await import("@anthropic-ai/sdk");
-        } catch (err) {
-          throw new ProviderError(
-            "O pacote @anthropic-ai/sdk não está instalado (rode `npm install @anthropic-ai/sdk`).",
-            { providerId: cfg.id, cause: err },
-          );
+        let Anthropic: AnthropicSdkConstructor;
+        if (opts.sdk) {
+          Anthropic = opts.sdk;
+        } else {
+          try {
+            const mod = await import("@anthropic-ai/sdk");
+            Anthropic = mod.default as unknown as AnthropicSdkConstructor;
+          } catch (err) {
+            throw new ProviderError(
+              "O pacote @anthropic-ai/sdk não está instalado (rode `npm install @anthropic-ai/sdk`).",
+              { providerId: cfg.id, cause: err },
+            );
+          }
         }
-        const Anthropic = mod.default;
         // `maxRetries: 0`: o backoff com jitter é do BotPlayer (docs/09, seção 3.5); dois
         // níveis de retry atrapalhariam o respeito ao `retry-after`.
-        const created = new Anthropic({ apiKey, maxRetries: 0, timeout });
+        const baseURL = cfg.baseUrl?.trim();
+        const created = new Anthropic({ apiKey, maxRetries: 0, timeout, ...(baseURL ? { baseURL } : {}) });
         return created as unknown as AnthropicClientLike;
       })().catch((err: unknown) => {
         clientPromise = null;
@@ -567,10 +587,10 @@ export function createAnthropicProvider(cfg: ProviderConfig, opts: AnthropicOpti
       return result;
     },
 
-    async listModels(): Promise<ModelInfo[]> {
+    async listModels(listOpts?: ListModelsOptions): Promise<ModelInfo[]> {
       const sdk = await client();
       try {
-        const page = await sdk.models.list({ limit: 100 }, { timeout });
+        const page = await sdk.models.list({ limit: 100 }, { timeout: listOpts?.timeoutMs ?? timeout });
         const data = Array.isArray(page?.data) ? page.data : [];
         const models = enrichModels(data);
         return models.length ? models : ANTHROPIC_MODELS;
@@ -582,7 +602,7 @@ export function createAnthropicProvider(cfg: ProviderConfig, opts: AnthropicOpti
     async test(): Promise<TestResult> {
       const started = now();
       try {
-        const models = await this.listModels();
+        const models = await this.listModels({ timeoutMs: MODELS_TIMEOUT_MS });
         return { ok: true, latencyMs: Math.max(0, now() - started), models: models.length };
       } catch (err) {
         return { ok: false, error: err instanceof ProviderError ? err.shortText : (err as Error).message };

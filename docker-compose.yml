@@ -8,24 +8,48 @@ services:
     user: "${UID:-1000}:${GID:-1000}"
     ports:
       # UI, API, WebSocket e MCP na mesma porta: http://localhost:3939 e http://localhost:3939/mcp
-      - "3939:3939"
+      # Por padrão só o próprio computador alcança (127.0.0.1). BIND_ADDR=0.0.0.0 abre para a
+      # rede local — nesse caso defina ADMIN_TOKEN e estreite ADMIN_ALLOW_FROM (ver abaixo).
+      - "${BIND_ADDR:-127.0.0.1}:3939:3939"
+    # Linux: faz host.docker.internal apontar para o host (Ollama/LM Studio rodando fora do
+    # container). No Docker Desktop (Windows/macOS) o nome já existe; a linha é inofensiva.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # O .env inteiro entra no container: é assim que variáveis de chave criadas por você
+    # (ex.: MEU_SERVIDOR_API_KEY, usada como apiKeyEnv de um provedor novo) chegam ao
+    # servidor. Opcional (compose v2.24+). Atenção: uma entrada em `environment` abaixo
+    # com o mesmo nome SOBRESCREVE o valor do .env — por isso as chaves não são listadas lá.
+    env_file:
+      - path: .env
+        required: false
     environment:
       HOST: 0.0.0.0
       PORT: 3939
       DATA_DIR: /app/data
       LANG: pt-BR
       HUMAN_NAME: ${HUMAN_NAME:-Você}
+      # Marca o ambiente como container (dicas de rede na UI e no teste de provedores).
+      RUNTIME: docker
       # Defina no .env para exigir "Authorization: Bearer <token>" em /mcp (útil ao expor por túnel).
       MCP_TOKEN: ${MCP_TOKEN:-}
+      # Token das rotas que gravam providers.json (vazio = usa o MCP_TOKEN). Quem manda
+      # "Authorization: Bearer <token>" administra de qualquer IP.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # IPs/CIDRs que administram SEM token, além do loopback. Com a porta presa em 127.0.0.1,
+      # o navegador do host chega ao container pelo gateway da bridge do Docker (faixa
+      # 172.16.0.0/12), então o default libera só o próprio computador. Se usar BIND_ADDR=0.0.0.0,
+      # quem estiver na LAN também pode chegar pela bridge: defina ADMIN_TOKEN e estreite esta
+      # lista (ex.: o IP exato do gateway, `docker network inspect llm-xadrez_default`).
+      ADMIN_ALLOW_FROM: ${ADMIN_ALLOW_FROM:-172.16.0.0/12}
+      # Hosts extras aceitos no header Host (ex.: nome da máquina na LAN, domínio do túnel).
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
       # URL anunciada aos clientes (banner, /api/health, UI). Mude se trocar a porta do host.
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3939}
 
       # --- Bots do servidor (docs/09). Opcional: sem chave, o container roda só com MCP. ---
-      # As chaves vêm do .env da raiz e ficam SÓ no ambiente: providers.json guarda
-      # apenas o nome da variável (apiKeyEnv).
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      # As chaves (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, LITELLM_API_KEY, as suas) vêm do
+      # .env via env_file e ficam SÓ no ambiente: providers.json guarda apenas o nome da
+      # variável (apiKeyEnv). Mudou o .env? `docker compose up -d` recria o container.
       # Arquivo de provedores/perfis (montado abaixo).
       PROVIDERS_FILE: /app/providers.json
       # Recria os bots do current-game.json quando o container reinicia.
@@ -35,7 +59,8 @@ services:
     volumes:
       # Partidas e estado atual persistem fora do container.
       - ./data:/app/data
-      # Provedores e perfis de bot: o arquivo não vai na imagem, então é montado do host.
+      # Provedores e perfis de bot: a imagem traz uma cópia padrão, mas o arquivo do host é montado
+      # por cima para as edições da tela "Provedores" persistirem.
       # Leitura e escrita, para a tela "Provedores" poder gravar.
       - ./providers.json:/app/providers.json
     restart: unless-stopped

@@ -13,8 +13,11 @@
 import type { ModelInfo } from "../../../../shared/types.js";
 import { createLogger } from "../../log.js";
 import {
+  MODELS_TIMEOUT_MS,
   ProviderError,
   defaultTimeoutMs,
+  isEffectivelyLocal,
+  type ListModelsOptions,
   type ChatMessage,
   type ChatProvider,
   type ChatRequest,
@@ -264,21 +267,22 @@ export function createOpenAiCompatProvider(cfg: ProviderConfig, opts: OpenAiComp
   const now = opts.now ?? (() => Date.now());
   const timeout = defaultTimeoutMs(cfg);
   const baseUrl = cfg.baseUrl ?? "";
+  const local = isEffectivelyLocal(cfg);
 
   const headers = (): Record<string, string> => {
     const h: Record<string, string> = { "Content-Type": "application/json", ...(cfg.extraHeaders ?? {}) };
     // Ollama exige um valor qualquer de Authorization; LM Studio/llama.cpp ignoram.
-    const key = opts.apiKey?.trim() || (cfg.local ? "local" : "");
+    const key = opts.apiKey?.trim() || (local ? "local" : "");
     if (key) h.Authorization = `Bearer ${key}`;
     return h;
   };
 
-  const requestSignal = (external?: AbortSignal): AbortSignal => {
-    const timer = AbortSignal.timeout(timeout);
+  const requestSignal = (ms: number, external?: AbortSignal): AbortSignal => {
+    const timer = AbortSignal.timeout(ms);
     return external ? AbortSignal.any([external, timer]) : timer;
   };
 
-  const call = async (path: string, init: RequestInit & { signal?: AbortSignal }): Promise<unknown> => {
+  const call = async (path: string, init: RequestInit & { signal?: AbortSignal }, timeoutMs = timeout): Promise<unknown> => {
     if (!baseUrl) {
       throw new ProviderError(`Provedor "${cfg.id}" sem baseUrl configurada.`, { providerId: cfg.id });
     }
@@ -289,8 +293,11 @@ export function createOpenAiCompatProvider(cfg: ProviderConfig, opts: OpenAiComp
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const aborted = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+      // `fetch failed` sozinho não diz nada: o código do sistema (ECONNREFUSED...) vem na causa.
+      const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+      const detail = typeof code === "string" && code ? `${message} (${code})` : message;
       throw new ProviderError(
-        aborted ? `Sem resposta em ${Math.round(timeout / 1000)} s (timeout).` : `Falha de rede: ${message}`,
+        aborted ? `Sem resposta em ${Math.round(timeoutMs / 1000)} s (timeout).` : `Falha de rede: ${detail}`,
         { providerId: cfg.id, retryable: true, cause: err },
       );
     }
@@ -348,7 +355,7 @@ export function createOpenAiCompatProvider(cfg: ProviderConfig, opts: OpenAiComp
             typeof req.toolChoice === "string" ? req.toolChoice : { type: "function", function: { name: req.toolChoice.name } };
         }
         // Provedores locais costumam rejeitar campos desconhecidos: só mandamos fora deles.
-        if (!cfg.local) body.parallel_tool_calls = cfg.parallelToolCalls ?? false;
+        if (!local) body.parallel_tool_calls = cfg.parallelToolCalls ?? false;
       }
       if (req.temperature !== undefined) body.temperature = req.temperature;
       if (req.maxTokens !== undefined) body.max_tokens = req.maxTokens;
@@ -356,7 +363,7 @@ export function createOpenAiCompatProvider(cfg: ProviderConfig, opts: OpenAiComp
       const json = await call("/chat/completions", {
         method: "POST",
         body: JSON.stringify(body),
-        signal: requestSignal(req.signal),
+        signal: requestSignal(timeout, req.signal),
       });
 
       const root = (json ?? {}) as Record<string, unknown>;
@@ -377,17 +384,18 @@ export function createOpenAiCompatProvider(cfg: ProviderConfig, opts: OpenAiComp
       return result;
     },
 
-    async listModels(): Promise<ModelInfo[]> {
+    async listModels(listOpts?: ListModelsOptions): Promise<ModelInfo[]> {
       const path = cfg.modelsPath ?? "/models";
       const query = cfg.modelsQuery ? `?${cfg.modelsQuery.replace(/^\?/, "")}` : "";
-      const json = await call(`${path}${query}`, { method: "GET", signal: requestSignal() });
+      const ms = listOpts?.timeoutMs ?? timeout;
+      const json = await call(`${path}${query}`, { method: "GET", signal: requestSignal(ms) }, ms);
       return parseModels(json);
     },
 
     async test(): Promise<TestResult> {
       const started = now();
       try {
-        const models = await this.listModels();
+        const models = await this.listModels({ timeoutMs: MODELS_TIMEOUT_MS });
         return { ok: true, latencyMs: Math.max(0, now() - started), models: models.length };
       } catch (err) {
         const message = err instanceof ProviderError ? err.shortText : err instanceof Error ? err.message : String(err);

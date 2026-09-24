@@ -2,6 +2,7 @@
  * API REST usada pelo navegador. Ver docs/03-servidor.md, "API REST".
  * Todas as rotas respondem JSON (exceto os PGNs). Erros de regra: 4xx com `ApiError`.
  */
+import crypto from "node:crypto";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import type {
   ApiError,
@@ -12,6 +13,8 @@ import type {
   MessageRequest,
   MoveRequest,
   NewGameRequest,
+  ProvidersResponse,
+  ProviderTestResponse,
   ResignRequest,
   SeatRequest,
   ServerInfo,
@@ -19,8 +22,10 @@ import type {
 } from "../../../shared/types.js";
 import { GameError, emptyBotUsage, type GameStore, type SeatInit } from "../game/store.js";
 import type { Persistence } from "../game/persist.js";
-import { PRESET_IDS, type ProviderRegistry } from "../bots/providers/registry.js";
+import { PRESET_IDS, ProvidersFileError, type ProviderRegistry } from "../bots/providers/registry.js";
 import { ProviderError } from "../bots/providers/types.js";
+import { PROVIDER_ID_PATTERN, validateProviderUpsert } from "../bots/providers/validate.js";
+import { ipInList, isLoopbackIp, isValidIpOrCidr } from "../bots/providers/net.js";
 import { createLogger } from "../log.js";
 
 const log = createLogger("api");
@@ -56,8 +61,16 @@ export interface ApiDeps {
   registry?: ProviderRegistry;
   /** BotManager (docs/09, fase C). */
   bots?: BotSeatingHook;
-  /** MCP_TOKEN: quando definido, as rotas de escrita de provedores exigem o Bearer. */
+  /**
+   * Token das rotas de administração (ADMIN_TOKEN, ou MCP_TOKEN se vazio). Quem manda
+   * `Authorization: Bearer <token>` administra de qualquer IP. Loopback e `adminAllowFrom`
+   * administram sem token.
+   */
   adminToken?: string;
+  /** IPs/CIDRs além do loopback que administram sem token (ADMIN_ALLOW_FROM; Docker: a bridge). */
+  adminAllowFrom?: string[];
+  /** Servidor dentro de um container: muda as dicas do teste de conexão (localhost ≠ host). */
+  inDocker?: boolean;
 }
 
 const COLORS: Color[] = ["white", "black"];
@@ -107,11 +120,31 @@ function httpStatusOf(err: unknown, fallback = 400): number {
   return typeof raw === "number" && raw >= 400 && raw < 600 ? raw : fallback;
 }
 
-/** Só o próprio computador pode reconfigurar provedores (docs/09, seção 6). */
-function isLoopback(ip: string | undefined): boolean {
-  if (!ip) return false;
-  const v = ip.replace(/^::ffff:/, "");
-  return v === "::1" || v === "127.0.0.1" || v.startsWith("127.");
+/** Comparação de tokens em tempo constante (hash antes, para não vazar o tamanho). */
+function tokenEquals(given: string, expected: string): boolean {
+  const a = crypto.createHash("sha256").update(given).digest();
+  const b = crypto.createHash("sha256").update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Quem pode gravar `providers.json` (docs/09, seção 6): o próprio computador (loopback),
+ * um IP/CIDR de `allowFrom` (no Docker, a bridge por onde o host chega ao container) ou
+ * quem apresentar `Authorization: Bearer <adminToken>`.
+ */
+export function isAdminRequest(
+  ip: string | undefined,
+  authorization: string | undefined,
+  opts: { adminToken?: string; adminAllowFrom?: readonly string[] },
+): boolean {
+  if (isLoopbackIp(ip)) return true;
+  if (opts.adminAllowFrom?.length && ipInList(ip, opts.adminAllowFrom)) return true;
+  if (opts.adminToken) {
+    const header = authorization ?? "";
+    const token = /^Bearer\s+/i.test(header) ? header.replace(/^Bearer\s+/i, "").trim() : "";
+    if (token && tokenEquals(token, opts.adminToken)) return true;
+  }
+  return false;
 }
 
 /** Cor do assento humano que deve agir (vez, ou o único humano). */
@@ -127,6 +160,9 @@ function humanSeatColor(store: GameStore, requested?: unknown): Color | null {
 export function createApiRouter(deps: ApiDeps): Router {
   const { store } = deps;
   const router = Router();
+  const adminAllowFrom = (deps.adminAllowFrom ?? []).map((e) => e.trim()).filter(Boolean);
+  const invalidAllow = adminAllowFrom.filter((e) => !isValidIpOrCidr(e));
+  if (invalidAllow.length) log.warn(`ADMIN_ALLOW_FROM ignora entradas inválidas: ${invalidAllow.join(", ")}`);
 
   /** Traduz um `SeatRequest` da UI num `SeatInit` do store. Lança `SeatRequestError`. */
   function seatInitFromRequest(color: Color, req: SeatRequest | undefined, humanName?: string): SeatInit {
@@ -174,10 +210,12 @@ export function createApiRouter(deps: ApiDeps): Router {
       const missing = registry.missingKeyReason(providerId);
       if (missing) throw new SeatRequestError(400, missing);
     }
+    // Mesma precedência do BotManager: perfil > provedor > "native" ("auto" começa nativo).
+    const mode = profile?.toolMode ?? registry?.get(providerId)?.toolMode ?? "native";
     const bot: BotSeatInfo = {
       providerId,
       model,
-      toolMode: profile?.toolMode ?? "native",
+      toolMode: mode === "text" ? "text" : "native",
       status: "stopped",
       statusText: "sem o gerenciador de bots no servidor",
       usage: emptyBotUsage(),
@@ -345,88 +383,105 @@ export function createApiRouter(deps: ApiDeps): Router {
     return null;
   }
 
-  /** Rotas que gravam `providers.json`: só localhost e, se houver MCP_TOKEN, com o Bearer. */
-  function canAdmin(req: Request, res: Response): boolean {
-    if (deps.adminToken) {
-      const header = req.header("authorization") ?? "";
-      const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-      if (token !== deps.adminToken) {
-        sendError(res, 403, "Configuração de provedores exige o MCP_TOKEN no header Authorization.");
-        return false;
-      }
-      return true;
-    }
-    if (!isLoopback(req.ip)) {
-      sendError(res, 403, "Configuração de provedores só é permitida a partir do próprio computador (localhost).");
-      return false;
-    }
-    return true;
+  const adminOpts = { adminToken: deps.adminToken, adminAllowFrom };
+
+  /** Pode gravar `providers.json`? (sem responder nada) */
+  function isAdmin(req: Request): boolean {
+    return isAdminRequest(req.ip, req.header("authorization"), adminOpts);
   }
 
-  function providerErrorStatus(err: unknown): number {
-    if (err instanceof ProviderError) {
-      if (err.status === 401 || err.status === 403) return 502;
-      return 502;
+  /** Rotas que gravam `providers.json`: loopback, ADMIN_ALLOW_FROM ou o Bearer do ADMIN_TOKEN. */
+  function requireAdmin(req: Request, res: Response): boolean {
+    if (isAdmin(req)) return true;
+    const tokenAccepted = !!deps.adminToken;
+    const error = tokenAccepted
+      ? `Configuração de provedores recusada para ${req.ip ?? "este endereço"}: envie o ADMIN_TOKEN (ou MCP_TOKEN) em "Authorization: Bearer <token>", ou inclua este IP/rede em ADMIN_ALLOW_FROM no .env.`
+      : `Configuração de provedores só é permitida a partir do próprio computador ou de ADMIN_ALLOW_FROM (pedido veio de ${req.ip ?? "endereço desconhecido"}). Inclua este IP/rede em ADMIN_ALLOW_FROM ou defina ADMIN_TOKEN no .env e reinicie o servidor.`;
+    const body: ApiError = { error, code: "admin_forbidden", adminTokenAccepted: tokenAccepted };
+    res.status(403).json(body);
+    return false;
+  }
+
+  /** Erro ao gravar providers.json → 500 com a mensagem pronta; outros → rethrow. */
+  function sendWriteError(res: Response, err: unknown): void {
+    if (err instanceof ProvidersFileError) {
+      sendError(res, 500, err.message);
+      return;
     }
-    return 500;
+    throw err;
   }
 
-  function providerErrorText(err: unknown): string {
-    if (err instanceof ProviderError) return err.shortText;
-    return err instanceof Error ? err.message : String(err);
-  }
-
-  router.get("/providers", (_req, res) => {
+  router.get("/providers", (req, res) => {
     const registry = registryOr503(res);
     if (!registry) return;
-    res.json({ providers: registry.publicList(), profiles: registry.profiles(), presets: PRESET_IDS });
+    const body: ProvidersResponse = {
+      providers: registry.publicList(),
+      profiles: registry.profiles(),
+      presets: PRESET_IDS,
+      envKeys: registry.envKeyNames(),
+      canAdmin: isAdmin(req),
+      adminTokenAccepted: !!deps.adminToken,
+    };
+    res.json(body);
   });
 
   router.put("/providers/:id", (req, res) => {
     const registry = registryOr503(res);
     if (!registry) return;
-    if (!canAdmin(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     const id = String(req.params.id ?? "").trim();
     if (!id) {
       sendError(res, 400, "Informe o id do provedor.");
       return;
     }
-    const body = (req.body ?? {}) as Record<string, unknown>;
     // A UI nunca envia a chave: ela vive só no .env (docs/09, seção 6).
-    for (const forbidden of ["apiKey", "api_key", "key", "token"]) {
-      if (forbidden in body) {
-        sendError(res, 400, "Chaves de API não são aceitas pela API: defina a variável de ambiente e use `apiKeyEnv`.");
-        return;
-      }
+    const checked = validateProviderUpsert(id, req.body ?? {}, registry.get(id));
+    if (!checked.ok) {
+      sendError(res, 400, checked.error);
+      return;
     }
-    delete body.id;
-    const saved = registry.upsert(id, body);
-    res.json(registry.toPublic(saved));
+    try {
+      const saved = registry.upsert(id, checked.patch);
+      if (checked.created) log.info(`provedor "${id}" criado (${saved.kind})`);
+      res.json(registry.toPublic(saved));
+    } catch (err) {
+      sendWriteError(res, err);
+    }
   });
 
   router.post("/providers/preset", (req, res) => {
     const registry = registryOr503(res);
     if (!registry) return;
-    if (!canAdmin(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     const body = (req.body ?? {}) as { preset?: unknown; id?: unknown };
     const preset = typeof body.preset === "string" ? body.preset : "";
     if (!preset || !PRESET_IDS.includes(preset)) {
       sendError(res, 400, `Preset desconhecido. Disponíveis: ${PRESET_IDS.join(", ")}.`);
       return;
     }
-    const id = typeof body.id === "string" && body.id.trim() ? body.id.trim() : preset;
+    // Sem `id`: usa o do preset e, se já existir, `custom-2`, `custom-3`... Com `id`: colisão = 409.
+    const explicitId = typeof body.id === "string" && body.id.trim() ? body.id.trim() : undefined;
+    if (explicitId !== undefined && !PROVIDER_ID_PATTERN.test(explicitId)) {
+      sendError(res, 400, "Id inválido: use de 1 a 40 caracteres entre a-z, 0-9, \"-\" e \"_\", começando por letra ou número.");
+      return;
+    }
+    if (explicitId !== undefined && registry.has(explicitId)) {
+      sendError(res, 409, `Já existe um provedor com id "${explicitId}".`);
+      return;
+    }
     try {
-      const cfg = registry.addPreset(preset, id);
+      const cfg = registry.addPreset(preset, explicitId);
       res.json(registry.toPublic(cfg));
     } catch (err) {
-      sendError(res, 409, providerErrorText(err));
+      if (err instanceof ProviderError) sendError(res, 409, err.shortText);
+      else sendWriteError(res, err);
     }
   });
 
   router.delete("/providers/:id", (req, res) => {
     const registry = registryOr503(res);
     if (!registry) return;
-    if (!canAdmin(req, res)) return;
+    if (!requireAdmin(req, res)) return;
     const id = String(req.params.id ?? "");
     const inUse = COLORS.some((c) => {
       const seat = store.getState().seats[c];
@@ -436,7 +491,14 @@ export function createApiRouter(deps: ApiDeps): Router {
       sendError(res, 409, `O provedor "${id}" está em uso por um bot na partida atual.`);
       return;
     }
-    if (!registry.remove(id)) {
+    let removed: boolean;
+    try {
+      removed = registry.remove(id);
+    } catch (err) {
+      sendWriteError(res, err);
+      return;
+    }
+    if (!removed) {
       sendError(res, 404, `Provedor "${id}" não encontrado.`);
       return;
     }
@@ -452,10 +514,15 @@ export function createApiRouter(deps: ApiDeps): Router {
       return;
     }
     registry
-      .test(id)
+      .test(id, { inDocker: !!deps.inDocker })
       .then((result) => {
-        if (result.ok) res.json(result);
-        else res.status(502).json({ ok: false, error: result.error } satisfies { ok: false; error: string });
+        if (result.ok) {
+          res.json({ ok: true, latencyMs: result.latencyMs, models: result.models } satisfies ProviderTestResponse);
+          return;
+        }
+        const body: ProviderTestResponse = { ok: false, error: result.error };
+        if (result.hint) body.hint = result.hint;
+        res.status(502).json(body);
       })
       .catch(next);
   });
@@ -472,7 +539,11 @@ export function createApiRouter(deps: ApiDeps): Router {
       .models(id, req.query.refresh === "1")
       .then((models) => res.json(models))
       .catch((err: unknown) => {
-        sendError(res, providerErrorStatus(err), providerErrorText(err));
+        // Mesmo diagnóstico do teste de conexão; `hint` vai junto do ApiError.
+        const diag = registry.diagnose(id, err, { inDocker: !!deps.inDocker });
+        const body: ApiError & { hint?: string } = { error: diag.error };
+        if (diag.hint) body.hint = diag.hint;
+        res.status(502).json(body);
       })
       .catch(next);
   });
@@ -599,6 +670,10 @@ export function createApiRouter(deps: ApiDeps): Router {
     }
     if (err instanceof ProviderError) {
       sendError(res, 502, err.shortText);
+      return;
+    }
+    if (err instanceof ProvidersFileError) {
+      sendError(res, 500, err.message);
       return;
     }
     const message = err instanceof Error ? err.message : String(err);

@@ -6,6 +6,7 @@
  * registry a partir do ambiente e nunca é serializada.
  */
 import type { ModelInfo, ProviderKind, ToolMode } from "../../../../shared/types.js";
+import { isLocalUrl } from "./net.js";
 
 export type { ModelInfo, ProviderKind, ToolMode };
 
@@ -62,7 +63,18 @@ export interface ChatResult {
   raw?: unknown;
 }
 
-export type TestResult = { ok: true; latencyMs: number; models: number } | { ok: false; error: string };
+export type TestResult =
+  | { ok: true; latencyMs: number; models: number }
+  /** `hint`: dica acionável em pt-BR (preenchida pelo diagnóstico do registry). */
+  | { ok: false; error: string; hint?: string };
+
+/** Opções de `listModels`: o teste de conexão usa um timeout curto, independente do chat. */
+export interface ListModelsOptions {
+  timeoutMs?: number;
+}
+
+/** Timeout de `GET /models` no teste de conexão e na listagem de modelos. */
+export const MODELS_TIMEOUT_MS = 10_000;
 
 export interface ChatProvider {
   readonly id: string;
@@ -70,7 +82,7 @@ export interface ChatProvider {
   /** Capacidade declarada na config, não detectada. */
   readonly supportsTools: boolean;
   chat(req: ChatRequest): Promise<ChatResult>;
-  listModels(): Promise<ModelInfo[]>;
+  listModels(opts?: ListModelsOptions): Promise<ModelInfo[]>;
   test(): Promise<TestResult>;
 }
 
@@ -82,7 +94,10 @@ export interface ProviderConfig {
   id: string;
   name: string;
   kind: ProviderKind;
-  /** Ex.: "https://openrouter.ai/api/v1". Ignorado pelo adaptador Anthropic (SDK). */
+  /**
+   * Ex.: "https://openrouter.ai/api/v1". No adaptador Anthropic vira o `baseURL` do SDK
+   * (gateway/proxy compatível com a Messages API); vazio = api.anthropic.com.
+   */
   baseUrl?: string;
   apiKeyEnv?: string;
   /** Provedor local (localhost): sem custo, timeouts maiores, aceita chave vazia. */
@@ -102,6 +117,8 @@ export interface ProviderConfig {
   modelsQuery?: string;
   /** Default: 60000 (cloud) / 180000 (local). */
   timeoutMs?: number;
+  /** Id do preset de origem (informativo; gravado por `POST /api/providers/preset`). */
+  preset?: string;
 }
 
 /** Erro de provedor com o suficiente para o loop decidir backoff (docs/09, seção 3.5). */
@@ -132,7 +149,17 @@ export class ProviderError extends Error {
   }
 }
 
+/**
+ * O provedor é local? `local` explícito na config vence; sem ele, infere pela baseUrl
+ * (localhost ou rede local: 10/8, 172.16/12, 192.168/16, 100.64/10, *.local,
+ * host.docker.internal...). Local = sem chave obrigatória, timeout longo e
+ * `Authorization: Bearer local` quando não há chave. Única fonte da regra: use sempre esta.
+ */
+export function isEffectivelyLocal(cfg: Pick<ProviderConfig, "local" | "baseUrl">): boolean {
+  return cfg.local ?? isLocalUrl(cfg.baseUrl);
+}
+
 /** Timeout default por requisição, conforme o provedor seja local ou remoto. */
 export function defaultTimeoutMs(cfg: ProviderConfig): number {
-  return cfg.timeoutMs ?? (cfg.local ? 180_000 : 60_000);
+  return cfg.timeoutMs ?? (isEffectivelyLocal(cfg) ? 180_000 : 60_000);
 }
