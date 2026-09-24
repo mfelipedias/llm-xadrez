@@ -11,11 +11,13 @@
  *   PLAY_COLOR=white npm run play        # entra de brancas
  *   PLAY_MODE=new PLAY_COLOR=white PLAY_OPPONENT=llm npm run play   # cria partida LLM vs LLM
  *   PLAY_MODE=new PLAY_COLOR=black npm run play                     # cria partida contra o humano
+ *   (PLAY_MODE=new passa confirm: true — arquiva e substitui a partida atual, mesmo em andamento)
  *
  * Variáveis: PLAY_URL (default http://localhost:3939), PLAY_NAME ("Claude Teste"),
  *   PLAY_COLOR (black|white|random), PLAY_MODE (join|new), PLAY_OPPONENT (human|llm, só em new),
  *   PLAY_FORCE (1 = join_game com force), PLAY_MAX_MOVES (sai depois de N lances próprios),
- *   PLAY_DELAY_MS (pausa antes de jogar, default 800), PLAY_WAIT_SECONDS (timeout do wait_for_turn, 60).
+ *   PLAY_DELAY_MS (pausa antes de jogar, default 800), PLAY_WAIT_SECONDS (timeout do wait_for_turn, 25),
+ *   PLAY_TOKEN (valor do MCP_TOKEN do servidor, se houver; vai no header Authorization: Bearer).
  * Termina com exit 0 quando a partida acaba (ou ao atingir PLAY_MAX_MOVES) e exit 1 em erro.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -37,7 +39,8 @@ const OPPONENT = env.PLAY_OPPONENT === "llm" ? "llm" : "human";
 const FORCE = env.PLAY_FORCE === "1";
 const MAX_MOVES = Number(env.PLAY_MAX_MOVES ?? 0) || Infinity;
 const DELAY_MS = Number(env.PLAY_DELAY_MS ?? 800) || 0;
-const WAIT_SECONDS = Math.min(120, Math.max(1, Number(env.PLAY_WAIT_SECONDS ?? 60) || 60));
+const WAIT_SECONDS = Math.min(120, Math.max(1, Number(env.PLAY_WAIT_SECONDS ?? 25) || 25));
+const TOKEN = (env.PLAY_TOKEN ?? "").trim();
 const REQUEST_TIMEOUT_MS = (WAIT_SECONDS + 15) * 1000;
 
 /** Linhas de abertura preferidas (SAN); se nenhuma for legal, joga captura ou aleatório. */
@@ -89,7 +92,10 @@ function chooseMove(state: GameState, color: Color, played: number): LegalMove {
 }
 
 async function main(): Promise<void> {
-  const transport = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`));
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`${BASE}/mcp`),
+    TOKEN ? { requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } } } : undefined,
+  );
   const client = new Client({ name: "llm-xadrez-play", version: "0.1.0" });
   await client.connect(transport);
   log(`conectado em ${BASE}/mcp; sessão ${transport.sessionId?.slice(0, 8) ?? "?"}`);
@@ -118,7 +124,8 @@ async function main(): Promise<void> {
   // Sentar.
   let seated: ToolResult;
   if (MODE === "new") {
-    seated = await call("new_game", { my_color: COLOR, opponent: OPPONENT, my_name: NAME });
+    // PLAY_MODE=new é um pedido explícito de partida nova: confirm dispensa a recusa do servidor.
+    seated = await call("new_game", { my_color: COLOR, opponent: OPPONENT, my_name: NAME, confirm: true });
   } else {
     const args: Record<string, unknown> = { my_name: NAME, force: FORCE };
     if (COLOR !== "random") args.color = COLOR;

@@ -28,6 +28,13 @@ export interface FormatOptions {
 
 const COLOR_UPPER: Record<Color, string> = { white: "BRANCAS", black: "PRETAS" };
 const COLOR_LOWER: Record<Color, string> = { white: "brancas", black: "pretas" };
+
+/**
+ * Dica para quem não está sentado: entrar na partida atual (join_game) em vez de apagá-la
+ * com new_game — depois de um restart ou quando a UI deixou um assento "Aguardando MCP".
+ */
+export const NOT_SEATED_TEXT =
+  "Você não ocupa nenhum assento. Chame join_game para entrar na partida atual (sem color ele escolhe o assento livre); new_game só se o usuário pedir uma nova partida.";
 const PIECE_NAME: Record<PieceType, string> = {
   p: "peão",
   n: "cavalo",
@@ -109,7 +116,7 @@ function statusText(state: GameState, perspective: Color | null): string {
 }
 
 export function nextActionText(state: GameState, perspective: Color | null): string {
-  if (!perspective) return "Você não ocupa nenhum assento. Chame new_game ou join_game.";
+  if (!perspective) return NOT_SEATED_TEXT;
   if (state.status === "finished") return "Partida encerrada. Comente o resultado com o aluno ou chame new_game para outra partida.";
   if (state.status === "waiting") return "Aguardando o oponente sentar. Chame wait_for_turn.";
   if (state.turn === perspective) return "É sua vez: chame make_move com um dos lances legais.";
@@ -313,7 +320,7 @@ export function formatTurnEvent(event: TurnEvent, state: GameState, perspective:
       head.push(`Nada aconteceu em ${Math.round(event.waitedSeconds)} s. Chame wait_for_turn de novo (ou converse com o aluno).`);
       break;
     case "not_seated":
-      head.push("Você não ocupa nenhum assento. Chame new_game ou join_game.");
+      head.push(NOT_SEATED_TEXT);
       break;
   }
   if (event.event !== "timeout" && event.waitedSeconds > 0) head.push(`(aguardou ${event.waitedSeconds} s)`);

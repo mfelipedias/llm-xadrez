@@ -291,8 +291,9 @@ describe("GameStore — assentos e retomada", () => {
     const store = humanVsLlm("s1");
     store.sessionOpened("s2");
     expect(() => store.joinGame({ sessionId: "s2", color: "black", name: "Outra" })).toThrowError(/force/);
-    // mesmo nome => retoma
-    expect(store.joinGame({ sessionId: "s2", color: "black", name: "Claude" })).toBe("black");
+    // mesmo nome NÃO basta com a dona viva
+    expect(() => store.joinGame({ sessionId: "s2", color: "black", name: "Claude" })).toThrowError(/outra sessão MCP ativa/);
+    expect(store.joinGame({ sessionId: "s2", color: "black", name: "Claude", force: true })).toBe("black");
     expect(store.getState().seats.black.sessionId).toBe("s2");
     // sessão s2 fechou; s3 retoma sem force
     store.sessionClosed("s2");
@@ -302,7 +303,7 @@ describe("GameStore — assentos e retomada", () => {
     expect(store.seatForSession("s2")).toBeNull();
   });
 
-  it("sessão ociosa há mais de 2 min pode ser retomada", () => {
+  it("sessão ociosa há mais de 5 min pode ser retomada (mesmo nome também)", () => {
     let t = 1_000_000;
     const store = new GameStore({ now: () => t });
     store.sessionOpened("s1");
@@ -310,7 +311,63 @@ describe("GameStore — assentos e retomada", () => {
     store.sessionOpened("s2");
     expect(() => store.joinGame({ sessionId: "s2", color: "black", name: "Outra" })).toThrowError(GameError);
     t += 121_000;
+    expect(() => store.joinGame({ sessionId: "s2", color: "black", name: "Claude" })).toThrowError(/5 min sem atividade/);
+    t += 180_000;
     expect(store.joinGame({ sessionId: "s2", color: "black", name: "Outra" })).toBe("black");
+  });
+
+  it("sessão com wait_for_turn pendente nunca é ociosa; touchSession renova", async () => {
+    let t = 1_000_000;
+    const store = new GameStore({ now: () => t });
+    store.sessionOpened("s1");
+    store.newGame({ seats: { white: { kind: "human" }, black: { kind: "mcp", name: "Claude", sessionId: "s1" } } });
+    store.sessionOpened("s2");
+    const ac = new AbortController();
+    const p = store.waitForTurn("black", 60_000, { sessionId: "s1", signal: ac.signal });
+    t += 3_600_000;
+    expect(store.hasWaiter("s1")).toBe(true);
+    expect(() => store.joinGame({ sessionId: "s2", color: "black", name: "Outra" })).toThrowError(/aguardando em wait_for_turn/);
+    expect(store.seatsWaitingForAgent()).toEqual([]);
+    ac.abort();
+    await p;
+    // sem waiter e 1 h sem atividade => retomável
+    expect(store.seatsWaitingForAgent()).toEqual(["black"]);
+    store.touchSession("s1");
+    expect(store.seatsWaitingForAgent()).toEqual([]);
+  });
+
+  it("sessionClosed remove a sessão do registro (sem crescer sem limite)", () => {
+    const store = new GameStore();
+    for (let i = 0; i < 50; i++) {
+      store.sessionOpened(`x${i}`);
+      store.sessionClosed(`x${i}`);
+    }
+    expect(store.sessionCount).toBe(0);
+    expect(store.isSessionOpen("x1")).toBe(false);
+    expect(store.serverInfo("t", "u").mcpSessions).toEqual([]);
+  });
+
+  it("serverInfo: active = waiter ou atividade nos últimos 2 min", async () => {
+    let t = 1_000_000;
+    const store = new GameStore({ now: () => t });
+    store.sessionOpened("s1");
+    store.newGame({ seats: { white: { kind: "human" }, black: { kind: "mcp", name: "Claude", sessionId: "s1" } } });
+    store.sessionOpened("idle");
+    const active = (id: string): boolean | undefined =>
+      store.serverInfo("t", "u").mcpSessions.find((s) => s.sessionId === id)?.active;
+    expect(active("s1")).toBe(true);
+    expect(active("idle")).toBe(true);
+    t += 121_000;
+    expect(active("idle")).toBe(false);
+    expect(active("s1")).toBe(false);
+    const ac = new AbortController();
+    const p = store.waitForTurn("black", 60_000, { sessionId: "s1", signal: ac.signal });
+    expect(active("s1")).toBe(true);
+    ac.abort();
+    await p;
+    expect(active("s1")).toBe(false);
+    store.touchSession("idle");
+    expect(active("idle")).toBe(true);
   });
 
   it("assento humano só com force; força vira mcp", () => {

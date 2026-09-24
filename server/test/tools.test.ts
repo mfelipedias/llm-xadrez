@@ -25,6 +25,8 @@ function ctx(store: GameStore, id: string): ToolContext {
 }
 
 const newGameArgs = z.object(inputShapes.new_game);
+/** new_game com confirm: true (a store nova tem as pretas "Aguardando MCP", o que exige confirm). */
+const ngArgs = (a: Record<string, unknown> = {}) => newGameArgs.parse({ confirm: true, ...a });
 const joinArgs = z.object(inputShapes.join_game);
 const makeMoveArgs = z.object(inputShapes.make_move);
 const waitArgs = z.object(inputShapes.wait_for_turn);
@@ -42,7 +44,7 @@ describe("tools — humano vs LLM", () => {
   it("new_game (defaults) senta a LLM de pretas contra o humano; structuredContent válido", () => {
     const store = new GameStore();
     const c = ctx(store, "s1");
-    const r = toolNewGame(c, newGameArgs.parse({}));
+    const r = toolNewGame(c, ngArgs());
     expect(r.isError).toBeUndefined();
     expect(text(r)).toContain("Você joga de PRETAS");
     expect(text(r)).toContain("➡ Próximo passo: Não é sua vez. Chame wait_for_turn.");
@@ -56,7 +58,7 @@ describe("tools — humano vs LLM", () => {
 
   it("new_game de brancas diz que é sua vez", () => {
     const store = new GameStore();
-    const r = toolNewGame(ctx(store, "s1"), newGameArgs.parse({ my_color: "white", opponent_name: "Ana" }));
+    const r = toolNewGame(ctx(store, "s1"), ngArgs({ my_color: "white", opponent_name: "Ana" }));
     expect(text(r)).toContain("contra Ana (humano");
     expect(text(r)).toContain("É sua vez: chame make_move");
     expect(text(r)).toMatch(/Lances legais \(é a sua vez; 20\)/);
@@ -64,7 +66,7 @@ describe("tools — humano vs LLM", () => {
 
   it("new_game com FEN inválido => isError", () => {
     const store = new GameStore();
-    const r = toolNewGame(ctx(store, "s1"), newGameArgs.parse({ start_fen: "isso não é fen" }));
+    const r = toolNewGame(ctx(store, "s1"), ngArgs({ start_fen: "isso não é fen" }));
     expect(r.isError).toBe(true);
     expect(text(r)).toContain("FEN inválido");
   });
@@ -73,13 +75,13 @@ describe("tools — humano vs LLM", () => {
     const store = new GameStore();
     const r = toolMakeMove(ctx(store, "zzz"), makeMoveArgs.parse({ move: "e4" }));
     expect(r.isError).toBe(true);
-    expect(text(r)).toContain("Chame new_game");
+    expect(text(r)).toContain("chame join_game");
   });
 
   it("make_move fora da vez e ilegal => isError com lances legais; sucesso => texto de próximo passo", () => {
     const store = new GameStore();
     const c = ctx(store, "s1");
-    toolNewGame(c, newGameArgs.parse({}));
+    toolNewGame(c, ngArgs());
     const early = toolMakeMove(c, makeMoveArgs.parse({ move: "e5" }));
     expect(early.isError).toBe(true);
     expect(text(early)).toContain("Não é sua vez");
@@ -101,7 +103,7 @@ describe("tools — humano vs LLM", () => {
   it("make_move que dá mate anuncia o resultado", () => {
     const store = new GameStore();
     const c = ctx(store, "s1");
-    toolNewGame(c, newGameArgs.parse({ my_color: "white" }));
+    toolNewGame(c, ngArgs({ my_color: "white" }));
     for (const [w, b] of [["e4", "e5"], ["Bc4", "Nc6"], ["Qh5", "Nf6"]]) {
       toolMakeMove(c, makeMoveArgs.parse({ move: w }));
       store.applyMove("black", b);
@@ -119,7 +121,7 @@ describe("tools — humano vs LLM", () => {
     expect((ns.structuredContent as { event: string }).event).toBe("not_seated");
     expect(turnEventSchema.safeParse(ns.structuredContent).success).toBe(true);
 
-    toolNewGame(c, newGameArgs.parse({}));
+    toolNewGame(c, ngArgs());
     const p = toolWaitForTurn(c, waitArgs.parse({ timeout_seconds: 2 }));
     store.applyMove("white", "e4");
     const moved = await p;
@@ -147,7 +149,7 @@ describe("tools — humano vs LLM", () => {
   it("get_state entrega mensagens pendentes uma única vez", () => {
     const store = new GameStore();
     const c = ctx(store, "s1");
-    toolNewGame(c, newGameArgs.parse({}));
+    toolNewGame(c, ngArgs());
     store.addHumanMessage("oi professor", "all");
     const first = toolGetState(c);
     expect(text(first)).toContain("Mensagens do aluno (1 nova)");
@@ -158,7 +160,7 @@ describe("tools — humano vs LLM", () => {
   it("comment e highlight retornam estado curto e atualizam o store", () => {
     const store = new GameStore();
     const c = ctx(store, "s1");
-    toolNewGame(c, newGameArgs.parse({}));
+    toolNewGame(c, ngArgs());
     const r = toolComment(c, commentArgs.parse({ text: "Repare no centro.", highlight: { squares: ["e4", { square: "d4", color: "green" }] } }));
     expect(text(r)).toContain("Comentário publicado");
     expect(text(r)).not.toContain("+------------------------+");
@@ -175,7 +177,7 @@ describe("tools — humano vs LLM", () => {
   it("takeback, end_game e leave_game", () => {
     const store = new GameStore();
     const c = ctx(store, "s1");
-    toolNewGame(c, newGameArgs.parse({}));
+    toolNewGame(c, ngArgs());
     const nothing = toolTakeback(c, takebackArgs.parse({}));
     expect(nothing.isError).toBe(true);
     store.applyMove("white", "e4");
@@ -200,7 +202,7 @@ describe("tools — LLM vs LLM", () => {
     const store = new GameStore();
     const a = ctx(store, "a");
     const b = ctx(store, "b");
-    const created = toolNewGame(a, newGameArgs.parse({ my_color: "white", opponent: "llm", my_name: "A" }));
+    const created = toolNewGame(a, ngArgs({ my_color: "white", opponent: "llm", my_name: "A" }));
     expect(text(created)).toContain('Aguardando outra LLM entrar com join_game(color: "black")');
     expect((created.structuredContent as unknown as GameState).status).toBe("waiting");
 
@@ -228,11 +230,99 @@ describe("tools — LLM vs LLM", () => {
   it("join_game retoma o assento após reconexão (sessão anterior fechada)", () => {
     const store = new GameStore();
     const a = ctx(store, "a");
-    toolNewGame(a, newGameArgs.parse({ my_name: "Claude Code" }));
+    toolNewGame(a, ngArgs({ my_name: "Claude Code" }));
     store.sessionClosed("a");
     const a2 = ctx(store, "a2");
     const r = toolJoinGame(a2, joinArgs.parse({ color: "black", my_name: "Claude Code" }));
     expect(r.isError).toBeUndefined();
     expect(store.seatForSession("a2")).toBe("black");
+  });
+});
+
+describe("tools — new_game não apaga partida à toa; join_game pega o assento livre", () => {
+  it("store nova (pretas \"Aguardando MCP\"): new_game sem confirm recusa sem mudar nada", () => {
+    const store = new GameStore();
+    const before = store.getState();
+    const r = toolNewGame(ctx(store, "s1"), newGameArgs.parse({}));
+    expect(r.isError).toBe(true);
+    expect(text(r)).toContain("new_game recusado");
+    expect(text(r)).toContain("PRETAS está esperando uma LLM");
+    expect(text(r)).toContain("chame join_game");
+    expect(text(r)).toContain("confirm: true");
+    expect(store.getState().id).toBe(before.id);
+    expect(store.seatForSession("s1")).toBeNull();
+  });
+
+  it("partida em andamento: recusa sem confirm, aceita com confirm", () => {
+    const store = new GameStore();
+    const a = ctx(store, "a");
+    toolNewGame(a, ngArgs({ my_color: "black" }));
+    store.applyMove("white", "e4");
+    const id = store.getState().id;
+    const refused = toolNewGame(a, newGameArgs.parse({ my_color: "white" }));
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("partida em andamento (1 meio-lance jogado)");
+    expect(store.getState().id).toBe(id);
+    expect(store.getState().ply).toBe(1);
+    const ok = toolNewGame(a, newGameArgs.parse({ my_color: "white", confirm: true }));
+    expect(ok.isError).toBeUndefined();
+    expect(store.getState().id).not.toBe(id);
+    expect(store.getState().ply).toBe(0);
+  });
+
+  it("sem lances e sem assento esperando (humano x LLM sentada): new_game direto; partida encerrada também", () => {
+    const store = new GameStore();
+    const a = ctx(store, "a");
+    toolNewGame(a, ngArgs());
+    expect(toolNewGame(a, newGameArgs.parse({ my_color: "white" })).isError).toBeUndefined();
+    store.applyMove("white", "e4");
+    store.endGame("resignation", "black");
+    expect(toolNewGame(a, newGameArgs.parse({})).isError).toBeUndefined();
+  });
+
+  it("depois de um restart (loadState: assento MCP vira vazio) join_game sem color retoma a partida", () => {
+    const store = new GameStore();
+    const a = ctx(store, "a");
+    toolNewGame(a, ngArgs({ my_name: "Claude" }));
+    store.applyMove("white", "e4");
+    const saved = JSON.parse(JSON.stringify(store.getState())) as GameState;
+    const fresh = new GameStore();
+    fresh.loadState(saved);
+    const b = ctx(fresh, "b");
+    const ng = toolNewGame(b, newGameArgs.parse({}));
+    expect(ng.isError).toBe(true);
+    const joined = toolJoinGame(b, joinArgs.parse({ my_name: "Claude" }));
+    expect(joined.isError).toBeUndefined();
+    expect(fresh.seatForSession("b")).toBe("black");
+    expect(fresh.getState().ply).toBe(1);
+    expect(fresh.getState().id).toBe(saved.id);
+  });
+
+  it("não sentado: dica manda para join_game, não para new_game", async () => {
+    const store = new GameStore();
+    const c = ctx(store, "s1");
+    const r = await toolWaitForTurn(c, waitArgs.parse({}));
+    expect((r.structuredContent as { nextAction: string }).nextAction).toContain("Chame join_game");
+    expect(text(toolGetState(c))).toContain("Chame join_game");
+  });
+
+  it("wait_for_turn: default de 25 s", () => {
+    expect(waitArgs.parse({}).timeout_seconds).toBe(25);
+    expect(() => waitArgs.parse({ timeout_seconds: 121 })).toThrow();
+  });
+
+  it("join_game pelo mesmo nome não toma assento de sessão viva sem force", () => {
+    const store = new GameStore();
+    const a = ctx(store, "a");
+    toolNewGame(a, ngArgs({ my_name: "Claude" }));
+    const b = ctx(store, "b");
+    const r = toolJoinGame(b, joinArgs.parse({ color: "black", my_name: "Claude" }));
+    expect(r.isError).toBe(true);
+    expect(text(r)).toContain("outra sessão MCP ativa");
+    expect(text(r)).toContain("force: true");
+    expect(store.seatForSession("a")).toBe("black");
+    const forced = toolJoinGame(b, joinArgs.parse({ color: "black", my_name: "Claude", force: true }));
+    expect(forced.isError).toBeUndefined();
+    expect(store.seatForSession("b")).toBe("black");
   });
 });

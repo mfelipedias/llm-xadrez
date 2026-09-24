@@ -2,18 +2,25 @@
  * Smoke test ponta a ponta: cliente MCP real (StreamableHTTPClientTransport) contra /mcp,
  * com `fetch` na REST simulando o humano. Ver docs/06 (Agente A, itens 6 e 7).
  *
- * Uso: `npm run smoke` (ou `SMOKE_URL=http://localhost:3939 npm run smoke`).
- * Se o servidor não estiver no ar, spawna `tsx server/src/index.ts` numa porta alternativa
- * (PORT=3940, DATA_DIR temporário) e mata no fim. Termina com "OK" (exit 0) ou erro (exit 1).
+ * Uso: `npm run smoke`. Por padrão SEMPRE spawna `tsx server/src/index.ts` numa porta livre
+ * (SMOKE_PORT para fixar), com DATA_DIR temporário e um MCP_TOKEN aleatório, e mata no fim —
+ * nunca cria partidas no servidor "de verdade" em :3939 (nem no container Docker).
+ * Para rodar contra um servidor já no ar: `SMOKE_URL=http://localhost:3939 [SMOKE_TOKEN=...] npm run smoke`
+ * (ATENÇÃO: isso arquiva/substitui a partida atual dele).
+ * Termina com "OK" (exit 0) ou erro (exit 1).
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { GameState, TurnEvent } from "../shared/types.js";
+import { WebSocket } from "ws";
+import type { GameState, ServerInfo, TurnEvent } from "../shared/types.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(here, "..");
@@ -55,21 +62,55 @@ async function isUp(base: string): Promise<boolean> {
   }
 }
 
-async function ensureServer(): Promise<{ base: string; child: ChildProcess | null; dataDir: string | null }> {
-  const wanted = process.env.SMOKE_URL ?? "http://localhost:3939";
-  if (await isUp(wanted)) {
-    console.log(`[smoke] usando servidor já no ar em ${wanted}`);
-    return { base: wanted, child: null, dataDir: null };
+interface SmokeServer {
+  base: string;
+  /** MCP_TOKEN do servidor ("" = sem token). */
+  token: string;
+  child: ChildProcess | null;
+  dataDir: string | null;
+}
+
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address() as net.AddressInfo;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function ensureServer(): Promise<SmokeServer> {
+  const external = process.env.SMOKE_URL?.replace(/\/+$/, "");
+  if (external) {
+    assert(await isUp(external), `SMOKE_URL=${external} não responde em /api/health`);
+    console.log(`[smoke] usando servidor já no ar em ${external} (SMOKE_URL)`);
+    return { base: external, token: process.env.SMOKE_TOKEN ?? "", child: null, dataDir: null };
   }
-  const port = Number(process.env.SMOKE_PORT ?? 3940);
+  const port = process.env.SMOKE_PORT ? Number(process.env.SMOKE_PORT) : await freePort();
   const base = `http://localhost:${port}`;
+  assert(!(await isUp(base)), `já há um servidor em ${base}: escolha outra SMOKE_PORT`);
+  const token = `smoke-${randomBytes(8).toString("hex")}`;
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-xadrez-smoke-"));
   const tsxCli = path.join(ROOT, "node_modules", "tsx", "dist", "cli.mjs");
   assert(fs.existsSync(tsxCli), `tsx não encontrado em ${tsxCli} (rode npm install)`);
-  console.log(`[smoke] servidor não está em ${wanted}; subindo um em ${base} (DATA_DIR=${dataDir})`);
+  console.log(`[smoke] subindo servidor próprio em ${base} (DATA_DIR=${dataDir}, MCP_TOKEN aleatório)`);
   const child = spawn(process.execPath, [tsxCli, path.join(ROOT, "server", "src", "index.ts")], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", DATA_DIR: dataDir, MCP_TOKEN: "", LOG_LEVEL: process.env.LOG_LEVEL ?? "warn" },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir,
+      MCP_TOKEN: token,
+      ADMIN_TOKEN: "",
+      PUBLIC_URL: "",
+      ALLOWED_HOSTS: ".smoke-tunnel.example",
+      RUNTIME: "node",
+      BOT_AUTORESUME: "0",
+      LOG_LEVEL: process.env.LOG_LEVEL ?? "warn",
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout?.on("data", (d: Buffer) => {
@@ -79,7 +120,7 @@ async function ensureServer(): Promise<{ base: string; child: ChildProcess | nul
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new SmokeError(`servidor terminou antes de subir (exit ${child.exitCode})`);
-    if (await isUp(base)) return { base, child, dataDir };
+    if (await isUp(base)) return { base, token, child, dataDir };
     await new Promise((r) => setTimeout(r, 300));
   }
   throw new SmokeError("servidor não subiu em 30 s");
@@ -89,12 +130,23 @@ async function ensureServer(): Promise<{ base: string; child: ChildProcess | nul
 /* Helpers MCP / REST                                                  */
 /* ------------------------------------------------------------------ */
 
-async function connect(base: string, name: string): Promise<{ client: Client; transport: StreamableHTTPClientTransport }> {
-  const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`));
+/**
+ * Conecta um cliente MCP. Com token: `via: "query"` usa `?token=` na URL (como os conectores do
+ * Claude.ai/ChatGPT); `via: "header"` usa `Authorization: Bearer`.
+ */
+async function connect(
+  srv: SmokeServer,
+  name: string,
+  via: "query" | "header" = "header",
+): Promise<{ client: Client; transport: StreamableHTTPClientTransport }> {
+  const url = new URL(`${srv.base}/mcp`);
+  if (srv.token && via === "query") url.searchParams.set("token", srv.token);
+  const requestInit = srv.token && via === "header" ? { headers: { Authorization: `Bearer ${srv.token}` } } : undefined;
+  const transport = new StreamableHTTPClientTransport(url, requestInit ? { requestInit } : undefined);
   const client = new Client({ name, version: "0.1.0" });
   await client.connect(transport);
   assert(transport.sessionId, "servidor não devolveu Mcp-Session-Id");
-  console.log(`[${name}] conectado; sessão ${transport.sessionId.slice(0, 8)}`);
+  console.log(`[${name}] conectado (${srv.token ? `token via ${via}` : "sem token"}); sessão ${transport.sessionId.slice(0, 8)}`);
   return { client, transport };
 }
 
@@ -135,9 +187,10 @@ async function humanMove(base: string, move: string): Promise<GameState> {
 /* Cenário 1: humano (REST) vs LLM (MCP)                               */
 /* ------------------------------------------------------------------ */
 
-async function scenarioHumanVsLlm(base: string): Promise<void> {
+async function scenarioHumanVsLlm(srv: SmokeServer): Promise<void> {
+  const base = srv.base;
   console.log("\n=== Cenário 1: humano (brancas, REST) vs LLM (pretas, MCP) ===");
-  const { client, transport } = await connect(base, "LLM");
+  const { client, transport } = await connect(srv, "LLM", "query");
   try {
     const tools = await client.listTools();
     const names = tools.tools.map((t) => t.name).sort();
@@ -156,8 +209,14 @@ async function scenarioHumanVsLlm(base: string): Promise<void> {
     const uris = resources.resources.map((r) => r.uri);
     for (const u of ["xadrez://game/state", "xadrez://game/pgn", "xadrez://game/state.json"]) assert(uris.includes(u), `recurso ${u} ausente`);
 
-    // Nova partida: LLM de pretas contra humano.
-    const created = await call(client, "LLM", "new_game", { my_color: "black", my_name: "Smoke LLM", opponent_name: "Humano" });
+    // Nova partida: LLM de pretas contra humano. Num servidor recém-subido as pretas estão
+    // "Aguardando MCP": sem confirm, new_game recusa (e manda usar join_game).
+    if (srv.child) {
+      const refused = await call(client, "LLM", "new_game", { my_color: "black", my_name: "Smoke LLM", opponent_name: "Humano" });
+      assert(refused.isError === true && textOf(refused).includes("new_game recusado"), "new_game sem confirm deveria recusar");
+      assert(textOf(refused).includes("join_game"), "recusa de new_game deveria sugerir join_game");
+    }
+    const created = await call(client, "LLM", "new_game", { my_color: "black", my_name: "Smoke LLM", opponent_name: "Humano", confirm: true });
     assert(!created.isError, "new_game falhou");
     assert(stateOf(created).seats.black.kind === "mcp", "LLM não sentou de pretas");
     assert(textOf(created).includes("Chame wait_for_turn"), "texto de próximo passo ausente");
@@ -244,18 +303,21 @@ async function scenarioHumanVsLlm(base: string): Promise<void> {
 /* Cenário 2: LLM vs LLM                                               */
 /* ------------------------------------------------------------------ */
 
-async function scenarioLlmVsLlm(base: string): Promise<void> {
+async function scenarioLlmVsLlm(srv: SmokeServer): Promise<void> {
   console.log("\n=== Cenário 2: LLM A (brancas) vs LLM B (pretas) ===");
-  const a = await connect(base, "A");
-  const b = await connect(base, "B");
+  const a = await connect(srv, "A", "header");
+  const b = await connect(srv, "B", "query");
   try {
+    // A partida do cenário 1 terminou em mate: new_game não precisa de confirm.
     const created = await call(a.client, "A", "new_game", { my_color: "white", opponent: "llm", my_name: "LLM A" });
     assert(!created.isError && stateOf(created).status === "waiting", "new_game(opponent: llm) deveria ficar waiting");
     assert(textOf(created).includes('join_game(color: "black")'), "texto de espera por outra LLM ausente");
 
     const waitA = call(a.client, "A", "wait_for_turn", { timeout_seconds: 30 });
     await new Promise((r) => setTimeout(r, 300));
-    const joined = await call(b.client, "B", "join_game", { color: "black", my_name: "LLM B" });
+    // Sem color: join_game escolhe o assento que espera uma LLM (pretas).
+    const joined = await call(b.client, "B", "join_game", { my_name: "LLM B" });
+    assert(stateOf(joined).seats.black.name === "LLM B", "join_game sem color deveria sentar B nas pretas");
     assert(!joined.isError && stateOf(joined).status === "active", "join_game não ativou a partida");
     const evA = eventOf(await waitA);
     assert(evA.event === "your_turn", `A esperava your_turn, veio ${evA.event}`);
@@ -296,12 +358,126 @@ async function scenarioLlmVsLlm(base: string): Promise<void> {
 
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Cenário 0: guardas HTTP (token, Host, /.well-known, sessão velha)   */
+/* ------------------------------------------------------------------ */
+
+function rawRequest(base: string, method: string, pathname: string, headers: Record<string, string>, body?: unknown): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+  const u = new URL(base);
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: u.hostname,
+        port: u.port,
+        method,
+        path: pathname,
+        headers: {
+          accept: "application/json, text/event-stream",
+          ...(payload ? { "content-type": "application/json", "content-length": String(Buffer.byteLength(payload)) } : {}),
+          ...headers,
+        },
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (c: string) => (data += c));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: data }));
+      },
+    );
+    req.on("error", reject);
+    req.setTimeout(10_000, () => req.destroy(new Error(`timeout em ${method} ${pathname}`)));
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function scenarioHttpGuards(srv: SmokeServer): Promise<void> {
+  console.log("\n=== Cenário 0: token, Host, /.well-known e initialize com sessão velha ===");
+  const init = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke-raw", version: "0.1.0" } },
+  };
+  const host = new URL(srv.base).host;
+  const auth: Record<string, string> = srv.token ? { authorization: `Bearer ${srv.token}` } : {};
+  if (srv.token) {
+    const noToken = await rawRequest(srv.base, "POST", "/mcp", { host }, init);
+    assert(noToken.status === 401 && String(noToken.headers["www-authenticate"] ?? "").includes("Bearer"), `sem token deveria dar 401 (veio ${noToken.status})`);
+    const wrong = await rawRequest(srv.base, "POST", "/mcp?token=errado", { host }, init);
+    assert(wrong.status === 401, `?token errado deveria dar 401 (veio ${wrong.status})`);
+    console.log("[http] /mcp sem token / token errado => 401 ok");
+  }
+  const stale = await rawRequest(srv.base, "POST", "/mcp", { host, ...auth, "mcp-session-id": "sessao-velha-de-antes-do-restart" }, init);
+  const sid = stale.headers["mcp-session-id"];
+  assert(stale.status === 200 && sid && sid !== "sessao-velha-de-antes-do-restart", `initialize com Mcp-Session-Id velho deveria abrir sessão nova (veio ${stale.status})`);
+  await rawRequest(srv.base, "DELETE", "/mcp", { host, ...auth, "mcp-session-id": String(sid), "mcp-protocol-version": "2025-06-18" });
+  console.log("[http] initialize com sessão velha => sessão nova ok");
+
+  if (srv.child) {
+    const evil = await rawRequest(srv.base, "POST", "/mcp", { host: "evil.example", ...auth }, init);
+    assert(evil.status === 403 && evil.body.includes("ALLOWED_HOSTS"), `Host evil.example deveria dar 403 (veio ${evil.status})`);
+    const evilApi = await rawRequest(srv.base, "GET", "/api/state", { host: "evil.example:80" });
+    assert(evilApi.status === 403, `Host evil.example em /api deveria dar 403 (veio ${evilApi.status})`);
+    const tunnel = await rawRequest(srv.base, "GET", "/api/health", { host: "abc.smoke-tunnel.example" });
+    assert(tunnel.status === 200, `Host do túnel (ALLOWED_HOSTS=.smoke-tunnel.example) deveria passar (veio ${tunnel.status})`);
+    console.log("[http] Host: evil.example => 403; *.smoke-tunnel.example => 200 ok");
+  }
+  const wk = await rawRequest(srv.base, "GET", "/.well-known/oauth-protected-resource", { host, accept: "text/html,*/*" });
+  assert(wk.status === 404 && String(wk.headers["content-type"] ?? "").includes("json"), `/.well-known deveria dar 404 JSON (veio ${wk.status})`);
+  console.log("[http] /.well-known => 404 JSON ok");
+
+  if (srv.child) {
+    const hello = await wsHello(srv.base);
+    const info = hello.server;
+    assert(info.mcpAuth === "token", `ServerInfo.mcpAuth deveria ser "token" (veio ${String(info.mcpAuth)})`);
+    assert(info.runtime === "node", `ServerInfo.runtime deveria ser "node" (veio ${String(info.runtime)})`);
+    assert(!JSON.stringify(hello).includes(srv.token), "o token vazou no hello do WebSocket");
+    let rejected = false;
+    try {
+      await wsHello(srv.base, "evil.example");
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, "upgrade do WebSocket com Host evil.example deveria ser recusado");
+    console.log("[ws] hello: mcpAuth=token runtime=node; Host evil.example recusado ok");
+  }
+}
+
+/** Abre o /ws, devolve a mensagem `hello` e fecha. */
+function wsHello(base: string, host?: string): Promise<{ server: ServerInfo }> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(`${base.replace(/^http/, "ws")}/ws`, host ? { headers: { host } } : undefined);
+    const timer = setTimeout(() => {
+      socket.terminate();
+      reject(new SmokeError("WebSocket sem hello em 5 s"));
+    }, 5000);
+    socket.once("message", (data) => {
+      clearTimeout(timer);
+      socket.close();
+      resolve(JSON.parse(String(data)) as { server: ServerInfo });
+    });
+    socket.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    socket.once("unexpected-response", (_req, res) => {
+      clearTimeout(timer);
+      socket.terminate();
+      reject(new SmokeError(`upgrade recusado (${res.statusCode})`));
+    });
+  });
+}
+
 async function main(): Promise<void> {
-  const { base, child, dataDir } = await ensureServer();
+  const srv = await ensureServer();
+  const { child, dataDir } = srv;
   let ok = false;
   try {
-    await scenarioHumanVsLlm(base);
-    await scenarioLlmVsLlm(base);
+    await scenarioHttpGuards(srv);
+    await scenarioHumanVsLlm(srv);
+    await scenarioLlmVsLlm(srv);
     ok = true;
   } finally {
     if (child) {

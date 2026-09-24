@@ -5,7 +5,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import express from "express";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import type { ServerInfo } from "../../shared/types.js";
 import { config, ROOT_DIR } from "./config.js";
 import { createLogger } from "./log.js";
@@ -14,6 +13,7 @@ import { attachPersistence } from "./game/persist.js";
 import { createApiRouter } from "./http/api.js";
 import { attachWebSocket } from "./http/ws.js";
 import { createMcpRouter } from "./mcp/transport.js";
+import { allowsUpgrade, buildHostPolicy, hostValidationMiddleware, wellKnownNotFound } from "./mcp/guards.js";
 import { ProviderRegistry } from "./bots/providers/registry.js";
 import { createFakeProvider } from "./bots/providers/fake.js";
 import { BotManager } from "./bots/manager.js";
@@ -31,12 +31,23 @@ if (config.botFakeProvider) {
 const bots = new BotManager({ store, registry, lang: config.lang });
 const serverInfo = (): ServerInfo => ({
   ...store.serverInfo(config.version, config.mcpUrl),
+  mcpAuth: config.mcpToken ? "token" : "none",
+  runtime: config.inDocker ? "docker" : "node",
   providers: registry.publicList(),
   profiles: registry.profiles(),
   bots: store.botSeats(),
 });
 
-const app = createMcpExpressApp({ host: config.host });
+// Proteção contra DNS rebinding em todas as rotas (e no upgrade do /ws), em qualquer bind:
+// loopback + host da PUBLIC_URL + host do bind + ALLOWED_HOSTS (aceita ".dominio" como curinga).
+// Substitui a validação do createMcpExpressApp do SDK, que em 0.0.0.0 não protegia e em
+// 127.0.0.1 recusava o Host de um túnel.
+const hostPolicy = buildHostPolicy({ baseUrl: config.baseUrl, bindHost: config.host, extra: config.allowedHosts });
+
+const app = express();
+app.disable("x-powered-by");
+app.use(hostValidationMiddleware(hostPolicy));
+app.use(express.json());
 
 app.use(
   "/api",
@@ -47,7 +58,9 @@ app.use(
     defaultHumanName: config.humanName,
     registry,
     bots,
-    ...(config.mcpToken ? { adminToken: config.mcpToken } : {}),
+    adminToken: config.adminToken || undefined,
+    adminAllowFrom: config.adminAllowFrom,
+    inDocker: config.inDocker,
   }),
 );
 
@@ -60,6 +73,9 @@ const mcp = createMcpRouter(store, {
   token: config.mcpToken || undefined,
 });
 app.use("/mcp", mcp.router);
+
+// Descoberta OAuth: 404 JSON em /.well-known (e não o index.html da SPA com 200).
+app.use("/.well-known", wellKnownNotFound);
 
 // UI: web/dist se existir; senão uma página mínima explicando como buildar.
 const distDir = path.join(ROOT_DIR, "web", "dist");
@@ -95,13 +111,34 @@ npm start</pre>
 <p>Em desenvolvimento, use <code>npm run dev</code> e abra <a href="http://localhost:5173">http://localhost:5173</a>.</p>
 <h2>Endpoint MCP</h2>
 <pre>${esc(config.mcpUrl)}</pre>
-<p>Claude Code: <code>claude mcp add --transport http xadrez ${esc(config.mcpUrl)}</code></p>
+<p>Claude Code: <code>claude mcp add -s user --transport http xadrez ${esc(config.mcpUrl)}</code>${
+    config.mcpToken ? ` (com MCP_TOKEN: <code>--header "Authorization: Bearer &lt;MCP_TOKEN&gt;"</code>)` : ""
+  }</p>
 <p>Estado atual (JSON): <a href="/api/state">/api/state</a> · Saúde: <a href="/api/health">/api/health</a> · PGN: <a href="/api/pgn">/api/pgn</a></p>
 </body></html>`;
 }
 
 const httpServer = app.listen(config.port, config.host, () => {
   const b = config.baseUrl;
+  const url = config.mcpUrl;
+  const sep = url.includes("?") ? "&" : "?";
+  const connect = config.mcpToken
+    ? [
+        "  Conectar clientes MCP (MCP_TOKEN ativo — troque <MCP_TOKEN> pelo valor do .env):",
+        `    Claude Code:     claude mcp add -s user --transport http xadrez ${url} --header "Authorization: Bearer <MCP_TOKEN>"`,
+        `    Sem headers:     ${url}${sep}token=<MCP_TOKEN>   (conectores do Claude.ai/ChatGPT)`,
+        "    Claude Desktop:  (claude_desktop_config.json)",
+        `      { "mcpServers": { "xadrez": { "command": "npx", "args": ["-y", "mcp-remote", "${url}", "--header", "Authorization: Bearer <MCP_TOKEN>"${url.startsWith("http:") ? ', "--allow-http"' : ""}] } } }`,
+      ]
+    : [
+        "  Conectar clientes MCP:",
+        `    Claude Code:     claude mcp add -s user --transport http xadrez ${url}`,
+        "    Claude Desktop:  (claude_desktop_config.json)",
+        `      { "mcpServers": { "xadrez": { "command": "npx", "args": ["-y", "mcp-remote", "${url}"${url.startsWith("http:") ? ', "--allow-http"' : ""}] } } }`,
+      ];
+  const hostsLine = hostPolicy.allowAny
+    ? "qualquer um (ALLOWED_HOSTS=*: proteção contra DNS rebinding desligada)"
+    : hostPolicy.entries.join(", ");
   const lines = [
     "",
     "  ♞ LLM Xadrez v" + config.version,
@@ -110,11 +147,10 @@ const httpServer = app.listen(config.port, config.host, () => {
     `  API REST:         ${b}/api/state`,
     `  WebSocket:        ${b.replace(/^http/, "ws")}/ws`,
     `  Dados:            ${config.dataDir}`,
+    `  Hosts aceitos:    ${hostsLine}`,
+    "                    (outro endereço — túnel, IP da rede? defina PUBLIC_URL ou ALLOWED_HOSTS)",
     "",
-    "  Conectar clientes MCP:",
-    `    Claude Code:     claude mcp add --transport http xadrez ${config.mcpUrl}`,
-    "    Claude Desktop:  (claude_desktop_config.json)",
-    `      { "mcpServers": { "xadrez": { "command": "npx", "args": ["-y", "mcp-remote", "${config.mcpUrl}", "--allow-http"] } } }`,
+    ...connect,
     "",
   ];
   console.log(lines.join("\n"));
@@ -125,7 +161,7 @@ httpServer.on("error", (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
-const ws = attachWebSocket(httpServer, store, serverInfo);
+const ws = attachWebSocket(httpServer, store, serverInfo, { verifyClient: (req) => allowsUpgrade(hostPolicy, req) });
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {

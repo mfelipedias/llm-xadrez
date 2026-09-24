@@ -6,7 +6,7 @@
  *  - a cada "bot" do store (status/uso de um assento bot): { type: "bot", color, bot }
  *  - ping/pong a cada 30 s
  */
-import type { Server as HttpServer } from "node:http";
+import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { BotSeatInfo, Color, GameState, ServerInfo, WsServerMessage } from "../../../shared/types.js";
 import type { GameStore } from "../game/store.js";
@@ -18,6 +18,11 @@ export interface WsOptions {
   path?: string;
   pingIntervalMs?: number;
   serverThrottleMs?: number;
+  /**
+   * Filtro do upgrade (ex.: validação do header Host contra DNS rebinding). `false` recusa o
+   * handshake com 403.
+   */
+  verifyClient?: (req: IncomingMessage) => boolean;
 }
 
 export interface WsHandle {
@@ -35,7 +40,20 @@ export function attachWebSocket(
   serverInfo: () => ServerInfo,
   opts: WsOptions = {},
 ): WsHandle {
-  const wss = new WebSocketServer({ server: httpServer, path: opts.path ?? "/ws" });
+  const verify = opts.verifyClient;
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path: opts.path ?? "/ws",
+    ...(verify
+      ? {
+          verifyClient: (info: { req: IncomingMessage }) => {
+            const ok = verify(info.req);
+            if (!ok) log.warn(`upgrade do WebSocket recusado: Host "${info.req.headers.host ?? "(ausente)"}" não permitido`);
+            return ok;
+          },
+        }
+      : {}),
+  });
   const pingIntervalMs = opts.pingIntervalMs ?? 30_000;
   const serverThrottleMs = opts.serverThrottleMs ?? 500;
 

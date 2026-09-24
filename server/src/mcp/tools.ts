@@ -9,7 +9,7 @@ import * as z from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Color, CommentCategory, GameState, HighlightSpec, TurnEvent } from "../../../shared/types.js";
 import { GameError, type GameStore, type SeatInit } from "../game/store.js";
-import { formatMoveRef, formatStateForLLM, formatTurnEvent, resultText, type Lang } from "../game/format.js";
+import { NOT_SEATED_TEXT, formatMoveRef, formatStateForLLM, formatTurnEvent, resultText, type Lang } from "../game/format.js";
 import { otherColor } from "../game/rules.js";
 
 /* ------------------------------------------------------------------ */
@@ -31,6 +31,12 @@ export interface ToolContext {
 /* ------------------------------------------------------------------ */
 /* Schemas zod (input e output)                                        */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Default de `wait_for_turn.timeout_seconds`: abaixo dos ~30-60 s de timeout que muitos
+ * clientes MCP aplicam a uma chamada de tool. Em "timeout" a LLM só chama de novo.
+ */
+export const DEFAULT_WAIT_SECONDS = 25;
 
 export const colorSchema = z.enum(["white", "black"]);
 export const pieceTypeSchema = z.enum(["p", "n", "b", "r", "q", "k"]);
@@ -213,6 +219,13 @@ export const inputShapes = {
     my_name: z.string().max(60).default("Claude").describe("Display name for this LLM in the UI."),
     opponent_name: z.string().max(60).optional().describe('Human name shown in the UI (ignored when opponent = "llm").'),
     start_fen: z.string().optional().describe("Optional FEN to start from a specific position (lesson, endgame, puzzle)."),
+    confirm: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Required (true) to replace a game in progress (at least one move played) or a game with a seat waiting for an MCP/LLM. " +
+          "Only set it when the user explicitly asked for a new game; otherwise call join_game.",
+      ),
   },
   join_game: {
     color: colorSchema.optional().describe("Seat to take. Omit to take the only free seat."),
@@ -225,7 +238,12 @@ export const inputShapes = {
     comment_category: commentCategorySchema.optional().describe('Category of the comment. Default: "plan".'),
   },
   wait_for_turn: {
-    timeout_seconds: z.number().min(1).max(120).default(60).describe("Max seconds to wait (1-120). Default 60."),
+    timeout_seconds: z
+      .number()
+      .min(1)
+      .max(120)
+      .default(DEFAULT_WAIT_SECONDS)
+      .describe(`Max seconds to wait (1-120). Default ${DEFAULT_WAIT_SECONDS}. On "timeout", just call wait_for_turn again.`),
   },
   comment: {
     text: z.string().min(1).max(4000).describe("The teacher comment (simple markdown allowed)."),
@@ -290,7 +308,10 @@ function withState(ctx: ToolContext, color: Color | null, prefix: string, opts: 
 
 function notSeated(ctx: ToolContext): CallToolResult {
   const state = ctx.store.getState();
-  const text = `Você não ocupa nenhum assento nesta partida. Chame new_game (para criar uma partida) ou join_game (para entrar na atual).\n\n${formatStateForLLM(state, null, { lang: ctx.lang, short: true })}`;
+  const text =
+    "Você não ocupa nenhum assento nesta partida. Se há uma partida em andamento ou um assento esperando uma LLM/MCP, " +
+    "chame join_game (sem color ele escolhe o assento livre). Só chame new_game se o usuário pediu explicitamente uma nova partida." +
+    `\n\n${formatStateForLLM(state, null, { lang: ctx.lang, short: true })}`;
   return stateResult(text, state, true);
 }
 
@@ -324,7 +345,34 @@ function seatColor(ctx: ToolContext): Color | null {
 /* Tools                                                               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Motivo para `new_game` exigir `confirm: true`, ou `null` se pode criar direto: partida em
+ * andamento com lances, ou assento esperando uma LLM (restart do servidor, "Aguardando MCP"
+ * na UI). Nesses casos o certo quase sempre é `join_game`; new_game arquivaria e apagaria tudo.
+ */
+function newGameGuard(ctx: ToolContext): string | null {
+  const state = ctx.store.getState();
+  if (state.status === "finished") return null;
+  const reasons: string[] = [];
+  if (state.ply > 0) reasons.push(`há uma partida em andamento (${state.ply} meio-lance${state.ply === 1 ? "" : "s"} jogado${state.ply === 1 ? "" : "s"})`);
+  const waiting = ctx.store.seatsWaitingForAgent();
+  if (waiting.length === 1) reasons.push(`o assento das ${COLOR_UPPER[waiting[0]]} está esperando uma LLM (MCP)`);
+  else if (waiting.length === 2) reasons.push("os dois assentos estão esperando uma LLM (MCP)");
+  return reasons.length ? reasons.join(" e ") : null;
+}
+
 export function toolNewGame(ctx: ToolContext, args: NewGameArgs): CallToolResult {
+  const reason = args.confirm ? null : newGameGuard(ctx);
+  if (reason) {
+    const joinHint =
+      ctx.store.seatsWaitingForAgent().length > 0
+        ? "Para jogar a partida atual, chame join_game (sem color ele escolhe o assento livre)."
+        : "Para acompanhar a partida atual, use get_state/wait_for_turn.";
+    const text =
+      `new_game recusado: ${reason}. Criar uma nova partida agora arquivaria a atual e reiniciaria o tabuleiro. ${joinHint} ` +
+      "Só chame new_game de novo com confirm: true se o usuário pediu explicitamente uma nova partida.";
+    return withState(ctx, seatColor(ctx), text, { short: true, isError: true });
+  }
   const myColor: Color = args.my_color === "random" ? (Math.random() < 0.5 ? "white" : "black") : args.my_color;
   const opp = otherColor(myColor);
   const mine: SeatInit = { kind: "mcp", name: args.my_name, sessionId: ctx.session.id };
@@ -400,11 +448,11 @@ export async function toolWaitForTurn(ctx: ToolContext, args: WaitForTurnArgs): 
       isYourTurn: false,
       messages: [],
       waitedSeconds: 0,
-      nextAction: "Você não ocupa nenhum assento. Chame new_game ou join_game.",
+      nextAction: NOT_SEATED_TEXT,
     };
     return eventResult(formatTurnEvent(event, state, null, { lang: ctx.lang, short: true }), event, state);
   }
-  const timeoutMs = Math.round(Math.min(120, Math.max(1, args.timeout_seconds ?? 60)) * 1000);
+  const timeoutMs = Math.round(Math.min(120, Math.max(1, args.timeout_seconds ?? DEFAULT_WAIT_SECONDS)) * 1000);
   const event = await store.waitForTurn(color, timeoutMs, { signal: ctx.signal, sessionId: ctx.session.id });
   store.touchSession(ctx.session.id);
   // A sessão pode ter perdido o assento enquanto esperava (new_game do humano, force de outra LLM).

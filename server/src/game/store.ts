@@ -47,6 +47,7 @@ import {
   toChessColor,
   type EndState,
 } from "./rules.js";
+import { NOT_SEATED_TEXT } from "./format.js";
 
 /* ------------------------------------------------------------------ */
 /* Tipos públicos                                                      */
@@ -125,7 +126,10 @@ export interface WaitOptions {
 export interface GameStoreOptions {
   defaultHumanName?: string;
   defaultLlmName?: string;
-  /** Tempo sem atividade após o qual um assento MCP pode ser retomado por outra sessão. */
+  /**
+   * Tempo sem atividade após o qual um assento MCP pode ser retomado por outra sessão
+   * (sem `force`). Uma sessão bloqueada em `wait_for_turn` nunca conta como ociosa. Default: 5 min.
+   */
   sessionIdleMs?: number;
   /**
    * Ao carregar `current-game.json`, manter assentos `bot` (o BotManager os recria) em vez de
@@ -162,8 +166,15 @@ interface Waiter {
 
 interface SessionInfo {
   openedAt: string;
-  closed: boolean;
+  /** Última requisição da sessão (epoch ms): qualquer POST/GET no /mcp ou chamada de tool. */
+  lastSeenMs: number;
 }
+
+/** Janela em que uma sessão conta como "ativa" em `ServerInfo.mcpSessions[].active`. */
+export const SESSION_ACTIVE_WINDOW_MS = 120_000;
+
+/** Default de `GameStoreOptions.sessionIdleMs`: ocioso por 5 min => assento retomável. */
+export const DEFAULT_SESSION_IDLE_MS = 300_000;
 
 const EVENT_PRIORITY: Record<TurnEventType, number> = {
   game_over: 9,
@@ -260,7 +271,7 @@ export class GameStore extends EventEmitter {
     super();
     this.defaultHumanName = opts.defaultHumanName ?? "Você";
     this.defaultLlmName = opts.defaultLlmName ?? "Claude";
-    this.sessionIdleMs = opts.sessionIdleMs ?? 120_000;
+    this.sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
     this.restoreBots = opts.restoreBots ?? true;
     this.now = opts.now ?? (() => Date.now());
     this.resetGame(DEFAULT_POSITION, {
@@ -431,8 +442,8 @@ export class GameStore extends EventEmitter {
 
   serverInfo(version: string, mcpUrl: string): ServerInfo {
     const mcpSessions: ServerInfo["mcpSessions"] = [];
+    const now = this.now();
     for (const [sessionId, info] of this.sessions) {
-      if (info.closed) continue;
       // Sessões sintéticas de bots não entram na lista (a UI mostraria "sem conexão"): o
       // status delas vai em ServerInfo.bots / seat.bot. Ver docs/09, seção 5.1.
       if (sessionId.startsWith(BOT_SESSION_PREFIX)) continue;
@@ -444,7 +455,9 @@ export class GameStore extends EventEmitter {
         entry.name = this.seats[seatColor].name;
         if (this.seats[seatColor].lastSeenAt) entry.lastSeenAt = this.seats[seatColor].lastSeenAt;
       }
-      if (this.waiters.some((w) => w.sessionId === sessionId)) entry.waiting = true;
+      const waiting = this.hasWaiter(sessionId);
+      if (waiting) entry.waiting = true;
+      entry.active = waiting || now - info.lastSeenMs <= SESSION_ACTIVE_WINDOW_MS;
       mcpSessions.push(entry);
     }
     return { version, mcpUrl, mcpSessions };
@@ -453,45 +466,77 @@ export class GameStore extends EventEmitter {
   /* --------------------------- sessões MCP ---------------------------- */
 
   sessionOpened(sessionId: string): void {
-    this.sessions.set(sessionId, { openedAt: this.nowIso(), closed: false });
+    this.sessions.set(sessionId, { openedAt: this.nowIso(), lastSeenMs: this.now() });
     this.emit("server");
   }
 
+  /** Sessão encerrada (DELETE, transporte fechado, varredura de ociosidade): some do registro. */
   sessionClosed(sessionId: string): void {
-    const info = this.sessions.get(sessionId);
-    if (info) info.closed = true;
+    this.sessions.delete(sessionId);
     // Quem estava esperando nessa sessão não vai receber a resposta: libera o timer.
     this.cancelWaiters((w) => w.sessionId === sessionId, "timeout");
     this.emit("server");
   }
 
   isSessionOpen(sessionId: string | undefined): boolean {
-    if (!sessionId) return false;
-    const info = this.sessions.get(sessionId);
-    return !!info && !info.closed;
+    return !!sessionId && this.sessions.has(sessionId);
   }
 
-  /** Sessão morta ou ociosa há mais de `sessionIdleMs`: o assento pode ser retomado. */
+  /** Quantas sessões estão registradas (abertas). */
+  get sessionCount(): number {
+    return this.sessions.size;
+  }
+
+  /** true se a sessão está bloqueada em `wait_for_turn` agora. */
+  hasWaiter(sessionId: string | undefined): boolean {
+    return !!sessionId && this.waiters.some((w) => w.sessionId === sessionId);
+  }
+
+  /**
+   * Sessão morta ou ociosa há mais de `sessionIdleMs`: o assento pode ser retomado sem `force`.
+   * Sessão com `wait_for_turn` pendente está viva, por mais longa que seja a espera.
+   */
   private isSessionGone(seat: Seat): boolean {
     if (!isAgentSeat(seat)) return false;
     if (!seat.sessionId) return true;
     const info = this.sessions.get(seat.sessionId);
-    if (!info || info.closed) return true;
+    if (!info) return true;
     // Um bot pode ficar minutos "pensando" num modelo local: quem controla o ciclo de vida
     // dele é o BotManager, não o relógio de ociosidade.
     if (seat.kind === "bot") return false;
-    const last = seat.lastSeenAt ? Date.parse(seat.lastSeenAt) : 0;
-    return this.now() - last > this.sessionIdleMs;
+    if (this.hasWaiter(seat.sessionId)) return false;
+    return this.now() - this.lastActivityMs(seat) > this.sessionIdleMs;
   }
 
-  /** Atualiza `lastSeenAt` do assento ocupado pela sessão (toda chamada de tool). */
+  /** Última atividade conhecida do dono do assento (sessão ou `seat.lastSeenAt`), epoch ms. */
+  private lastActivityMs(seat: Seat): number {
+    const fromSeat = seat.lastSeenAt ? Date.parse(seat.lastSeenAt) : 0;
+    const info = seat.sessionId ? this.sessions.get(seat.sessionId) : undefined;
+    return Math.max(Number.isFinite(fromSeat) ? fromSeat : 0, info?.lastSeenMs ?? 0);
+  }
+
+  /**
+   * Registra atividade da sessão: toda requisição no /mcp e toda chamada de tool. Atualiza
+   * também o `lastSeenAt` do assento que ela ocupa.
+   */
   touchSession(sessionId: string | undefined): void {
     if (!sessionId) return;
+    const info = this.sessions.get(sessionId);
+    if (info) info.lastSeenMs = this.now();
     const color = this.seatForSession(sessionId);
-    if (!color) return;
-    this.seats[color].lastSeenAt = this.nowIso();
-    this.stateCache = null;
-    this.emit("server");
+    if (color) {
+      this.seats[color].lastSeenAt = this.nowIso();
+      this.stateCache = null;
+    }
+    if (info || color) this.emit("server");
+  }
+
+  /**
+   * Assentos esperando um agente MCP: vazios, ou de uma sessão MCP morta/ociosa.
+   * É o que `join_game` sem `color` escolhe e o que faz `new_game` pedir `confirm`.
+   */
+  seatsWaitingForAgent(): Color[] {
+    return (["white", "black"] as Color[]).filter((c) => this.isSeatFree(c));
   }
 
   seatForSession(sessionId: string | undefined): Color | null {
@@ -577,7 +622,7 @@ export class GameStore extends EventEmitter {
 
     let target = opts.color;
     if (!target) {
-      const free = (["white", "black"] as Color[]).filter((c) => this.isSeatFree(c));
+      const free = this.seatsWaitingForAgent();
       if (free.length === 1) target = free[0];
       else if (free.length === 0) {
         throw new GameError("no_free_seat", "Nenhum assento livre. Use force: true para tomar um, ou new_game para começar outra partida.");
@@ -601,10 +646,17 @@ export class GameStore extends EventEmitter {
         `O assento das ${colorPt} está ocupado por um bot do servidor (${seat.name}). Use force: true para tomá-lo (o bot é parado) ou entre na outra cor.`,
       );
     }
-    if (seat.kind === "mcp" && !opts.force && !this.isSessionGone(seat) && seat.name !== name) {
+    if (seat.kind === "mcp" && !opts.force && !this.isSessionGone(seat)) {
+      // Mesmo nome NÃO basta: duas LLMs podem se chamar "Claude". Só retoma sem force quem
+      // encontra a sessão dona fechada ou ociosa (sem requisições e sem wait_for_turn pendente).
+      const idleS = Math.max(0, Math.round((this.now() - this.lastActivityMs(seat)) / 1000));
+      const limitMin = Math.round(this.sessionIdleMs / 60_000);
+      const who = this.hasWaiter(seat.sessionId) ? "está aguardando em wait_for_turn agora" : `teve atividade há ${idleS} s`;
       throw new GameError(
         "seat_taken",
-        `O assento das ${colorPt} está ocupado por outra LLM ativa (${seat.name}). Use force: true para tomá-lo.`,
+        `O assento das ${colorPt} está ocupado por outra sessão MCP ativa ("${seat.name}", que ${who}). ` +
+          `Se essa sessão era sua e caiu (reconexão), o assento fica livre sozinho depois de ${limitMin} min sem atividade — ` +
+          "ou use force: true para tomá-lo agora (a outra sessão perde o assento). Se for outra LLM jogando, não use force: entre na outra cor ou pergunte ao usuário.",
       );
     }
 
@@ -885,7 +937,7 @@ export class GameStore extends EventEmitter {
   }
 
   nextAction(color: Color | null): string {
-    if (!color) return "Você não ocupa nenhum assento. Chame new_game ou join_game.";
+    if (!color) return NOT_SEATED_TEXT;
     const status = this.computeStatus();
     if (status === "finished") return "Partida encerrada. Comente o resultado com o aluno ou chame new_game para outra partida.";
     if (status === "waiting") return "Aguardando o oponente sentar. Chame wait_for_turn.";

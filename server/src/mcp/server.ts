@@ -9,6 +9,7 @@ import type { GameStore } from "../game/store.js";
 import { formatStateForLLM, type Lang } from "../game/format.js";
 import { registerPrompts } from "./prompts.js";
 import {
+  DEFAULT_WAIT_SECONDS,
   gameStateOutputShape,
   inputShapes,
   toolComment,
@@ -43,15 +44,21 @@ export interface McpServerOptions {
 
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
+/** Texto de `instructions` do initialize (o cliente costuma injetá-lo no prompt da LLM). */
+export const SERVER_INSTRUCTIONS =
+  "Chess board connected to a web UI where a person watches (and may play). " +
+  "To start, call join_game: if a game is in progress or a seat is waiting for an MCP/LLM, join_game (without color) takes the free seat and keeps the game. " +
+  "Only call new_game when the user explicitly asks for a new game: it archives and wipes the current one (it refuses with an error unless confirm: true when a game is in progress or a seat is waiting for an LLM). " +
+  `Then alternate wait_for_turn and make_move. wait_for_turn blocks up to ${DEFAULT_WAIT_SECONDS} s by default and returns "timeout" when nothing happened: that is normal, just call wait_for_turn again (keep looping until it is your turn). ` +
+  "Every response contains the full verified game state (FEN, pieces, legal moves, history) and a 'Próximo passo' hint: follow it. " +
+  "Never rely on memory: pick moves from the legalMoves of the latest response. Use comment/highlight to teach.";
+
 export function createMcpServer(store: GameStore, session: SessionRef, opts: McpServerOptions): McpServer {
   const server = new McpServer(
     { name: "llm-xadrez", version: opts.version },
     {
       capabilities: { logging: {} },
-      instructions:
-        "Chess board connected to a web UI. Call new_game (or join_game) once, then alternate wait_for_turn and make_move. " +
-        "Every response contains the full verified game state (FEN, pieces, legal moves, history) and a 'Próximo passo' hint. " +
-        "Never rely on memory: pick moves from the legalMoves of the latest response. Use comment/highlight to teach.",
+      instructions: SERVER_INSTRUCTIONS,
     },
   );
 
@@ -74,7 +81,9 @@ export function createMcpServer(store: GameStore, session: SessionRef, opts: Mcp
     {
       title: "New game",
       description:
-        "Start a new chess game (the current one is archived as PGN) and seat this session on the chosen color. " +
+        "Start a NEW chess game (the current one is archived as PGN and the board is reset) and seat this session on the chosen color. " +
+        "Only use it when the user explicitly asks for a new game; to play the game already on the board (e.g. a seat waiting for an MCP/LLM, or after a server restart) call join_game instead. " +
+        "If a game is in progress (at least one move) or a seat is waiting for an LLM, it refuses with an error unless confirm=true. " +
         'opponent="human" (default): the other seat is the person in the browser. opponent="llm": the other seat waits for another MCP session (join_game). ' +
         "Returns the full state and what to do next.",
       inputSchema: inputShapes.new_game,
@@ -88,8 +97,10 @@ export function createMcpServer(store: GameStore, session: SessionRef, opts: Mcp
     {
       title: "Join game",
       description:
-        "Join the current game on a free seat (or resume your own seat after a reconnect). " +
-        "A seat held by a dead/idle MCP session, or with the same my_name, can be resumed without force. force=true takes it unconditionally.",
+        "Join the current game (keeps the board as it is). Without color it takes the free seat, i.e. the one waiting for an MCP/LLM. " +
+        "Use it to resume your seat after a reconnect or a server restart. " +
+        "A seat held by a closed MCP session, or one idle for 5+ minutes (no requests and no pending wait_for_turn), can be taken without force; " +
+        "a seat of a live session requires force=true even with the same my_name (force takes it unconditionally: only use it if that session is yours and stuck, or the user asked).",
       inputSchema: inputShapes.join_game,
       outputSchema: gameStateOutputShape,
     },
@@ -127,8 +138,9 @@ export function createMcpServer(store: GameStore, session: SessionRef, opts: Mcp
     {
       title: "Wait for turn",
       description:
-        "Block (up to timeout_seconds, max 120) until something relevant happens for you: opponent_moved, your_turn, message from the student, takeback, opponent_joined, new_game, game_over. " +
-        "Returns 'timeout' if nothing happened: just call it again. Events are queued per seat, so nothing is lost while you are not waiting.",
+        `Block (up to timeout_seconds: default ${DEFAULT_WAIT_SECONDS}, max 120) until something relevant happens for you: opponent_moved, your_turn, message from the student, takeback, opponent_joined, new_game, game_over. ` +
+        "Returns 'timeout' if nothing happened: that is normal, just call it again. Events are queued per seat, so nothing is lost while you are not waiting. " +
+        "Keep the default unless your client allows long tool calls (a client-side timeout would cut the call).",
       inputSchema: inputShapes.wait_for_turn,
       outputSchema: turnEventOutputShape,
     },

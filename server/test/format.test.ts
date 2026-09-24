@@ -149,6 +149,6 @@ describe("formatTurnEvent / describeMove / formatHistory", () => {
     const t = formatTurnEvent({ event: "timeout", isYourTurn: false, messages: [], waitedSeconds: 60, nextAction: "x" }, state, "black");
     expect(t).toContain("Nada aconteceu em 60 s. Chame wait_for_turn de novo");
     const n = formatTurnEvent({ event: "not_seated", isYourTurn: false, messages: [], waitedSeconds: 0, nextAction: "x" }, state, null);
-    expect(n).toContain("Chame new_game ou join_game");
+    expect(n).toContain("Chame join_game");
   });
 });
