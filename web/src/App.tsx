@@ -655,7 +655,8 @@ export function App() {
       )}
       {showHelp && server && (
         <ConnectHelp
-          mcpUrl={server.mcpUrl}
+          server={server}
+          state={state}
           onClose={() => setShowHelp(false)}
           {...(hasProviderLayer
             ? {
@@ -667,7 +668,7 @@ export function App() {
             : {})}
         />
       )}
-      {showProviders && <ProvidersDialog onClose={() => setShowProviders(false)} />}
+      {showProviders && <ProvidersDialog server={server} onClose={() => setShowProviders(false)} />}
       {changeBot && (
         <ChangeBotDialog
           color={changeBot}

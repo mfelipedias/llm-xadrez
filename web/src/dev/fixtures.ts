@@ -10,9 +10,16 @@
  *   ?mock=empty      nenhuma partida começou, os dois assentos livres
  *   ?mock=bots       humano (brancas) vs bot do servidor (pretas), pensando (docs/09 §4.3)
  *   ?mock=botsvsbots dois bots do servidor jogando: espectador com balões duplos (docs/10 §3.5)
+ *   ?mock=docker     servidor em Docker com MCP_TOKEN: pretas aguardando MCP, uma sessão velha
+ *                    (inativa) que não conta como "cliente registrado"
  *
- * Os cenários com bot também respondem às rotas `/api/providers*` através de
- * `mockRequest`, para a tela "Provedores" poder ser vista sem servidor.
+ * Todos os cenários respondem às rotas `/api/providers*` através de `mockRequest`,
+ * para a tela "Provedores" poder ser vista sem servidor. A gravação (PUT, preset,
+ * DELETE) mexe só numa cópia em memória, que some ao recarregar a página.
+ *
+ * `&admin=token` simula um navegador de outro computador com `ADMIN_TOKEN` no servidor:
+ * as rotas de administração respondem 403 `admin_forbidden` até um token ser digitado
+ * (qualquer valor serve). `&admin=none` simula o mesmo sem token aceito.
  */
 import { Chess } from "chess.js";
 import type {
@@ -44,7 +51,8 @@ export type MockScenario =
   | "finished"
   | "empty"
   | "bots"
-  | "botsvsbots";
+  | "botsvsbots"
+  | "docker";
 
 const HUMAN_NAME = "Felipe";
 const AI_NAME = "Claude";
@@ -298,11 +306,23 @@ const mcpSeat = (name: string, sessionId: string): Seat => ({
 });
 const emptySeat = (): Seat => ({ kind: "empty", name: "" });
 
-function mcpSession(sessionId: string, name: string, seat: Color | undefined, waiting: boolean) {
-  return { sessionId, name, seat, lastSeenAt: new Date(Date.now() - 1200).toISOString(), waiting };
+function mcpSession(sessionId: string, name: string, seat: Color | undefined, waiting: boolean, active = true) {
+  return {
+    sessionId,
+    name,
+    seat,
+    lastSeenAt: new Date(Date.now() - (active ? 1200 : 22 * 60_000)).toISOString(),
+    waiting,
+    active,
+  };
 }
 
-const serverBase = { version: "0.1.0-mock", mcpUrl: "http://localhost:3939/mcp" };
+const serverBase: Pick<ServerInfo, "version" | "mcpUrl" | "mcpAuth" | "runtime"> = {
+  version: "0.1.0-mock",
+  mcpUrl: "http://localhost:3939/mcp",
+  mcpAuth: "none",
+  runtime: "node",
+};
 
 /* ---------------------------- cenários ---------------------------- */
 
@@ -494,6 +514,27 @@ function emptyScenario(): { state: GameState; server: ServerInfo } {
       status: "waiting",
     }),
     server: { ...serverBase, mcpSessions: [] },
+  };
+}
+
+/**
+ * Servidor em Docker com `MCP_TOKEN`: o humano está de brancas, as pretas esperam
+ * uma sessão MCP e a única sessão conhecida está inativa há 22 min — o passo 2 do
+ * onboarding não pode contá-la como "cliente registrado".
+ */
+function dockerScenario(): { state: GameState; server: ServerInfo } {
+  const base = waitingScenario();
+  return {
+    state: { ...base.state, id: "docker" },
+    server: {
+      ...serverBase,
+      runtime: "docker",
+      mcpAuth: "token",
+      mcpSessions: [mcpSession("sess-velha", "Claude Code", undefined, false, false)],
+      providers: MOCK_PROVIDERS,
+      profiles: MOCK_PROFILES,
+      bots: { white: null, black: null },
+    },
   };
 }
 
@@ -773,25 +814,190 @@ function botsVsBotsScenario(): { state: GameState; server: ServerInfo } {
   };
 }
 
-/**
- * Respostas de fixture para as rotas que a UI lê em modo `?mock=` — só leitura.
- * Escrita (PUT/DELETE de provedor, sit/stop de bot) devolve `null` e fica no
- * console, como antes. Nenhuma chave de API existe aqui: o valor mascarado é
- * literal de demonstração.
- */
-export function mockRequest(path: string, method: string): unknown {
-  const route = path.split("?")[0];
-  if (route === "/api/providers" && method === "GET") {
-    return { providers: MOCK_PROVIDERS, profiles: MOCK_PROFILES, presets: MOCK_PRESETS };
+/** Erro HTTP simulado: `api.ts` o converte em `ApiError` como faria com a resposta real. */
+export class MockHttpError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(status: number, body: unknown) {
+    super(`HTTP ${status}`);
+    this.status = status;
+    this.body = body;
   }
+}
+
+/** Cópia em memória que a gravação em modo mock altera (recarregar a página desfaz). */
+let mockProviders: ProviderPublic[] | null = null;
+function providersStore(): ProviderPublic[] {
+  if (!mockProviders) mockProviders = MOCK_PROVIDERS.map((p) => ({ ...p }));
+  return mockProviders;
+}
+
+const MOCK_ENV_KEYS = ["OPENROUTER_API_KEY", "GROQ_API_KEY", "MEU_SERVIDOR_API_KEY"];
+const MOCK_ENV_MASKS: Record<string, string> = {
+  OPENROUTER_API_KEY: "sk-or-…a1b2",
+  GROQ_API_KEY: "gsk_…9f3c",
+  MEU_SERVIDOR_API_KEY: "…77e1",
+};
+
+function mockParams(): { scenario: string; admin: string | null } {
+  const params = new URLSearchParams(window.location.search);
+  return { scenario: params.get("mock") ?? "", admin: params.get("admin") };
+}
+
+/**
+ * Mesmas regras de "local" do servidor: loopback, redes privadas e link-local,
+ * `.local`/`.lan`/`.internal`/`.home.arpa`, nomes sem ponto (serviço do compose)
+ * e host.docker.internal.
+ */
+function isLocalUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return (
+      host === "localhost" ||
+      host === "host.docker.internal" ||
+      !host.includes(".") ||
+      /\.(local|lan|internal|home\.arpa)$/.test(host) ||
+      /^169\.254\./.test(host) ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function mockTest(provider: ProviderPublic, docker: boolean): unknown {
+  const models = MOCK_MODELS[provider.id];
+  if (models) return { ok: true, latencyMs: 231, models: models.length };
+  const url = provider.baseUrl ?? "";
+  if (/localhost|127\.0\.0\.1/.test(url)) {
+    if (docker) {
+      throw new MockHttpError(502, {
+        ok: false,
+        error: `conexão recusada em ${new URL(url).host}`,
+        hint: "O servidor roda em Docker: dentro do container, localhost é o próprio container. Use http://host.docker.internal:<porta>/v1 no endereço.",
+      });
+    }
+    throw new MockHttpError(502, {
+      ok: false,
+      error: `conexão recusada em ${new URL(url).host}`,
+      hint: "O servidor do modelo está no ar? Ollama: rode `ollama serve`. LM Studio: aba Developer → Start Server.",
+    });
+  }
+  if (/host\.docker\.internal/.test(url)) {
+    throw new MockHttpError(502, {
+      ok: false,
+      error: `conexão recusada em ${new URL(url).host}`,
+      hint: "O container chegou ao seu computador, mas nada respondeu nessa porta para ele. Ollama escuta só em 127.0.0.1 por padrão: rode com OLLAMA_HOST=0.0.0.0. LM Studio: ligue \"Serve on Local Network\".",
+    });
+  }
+  if (/192\.168\.|\/\/10\./.test(url)) {
+    throw new MockHttpError(502, {
+      ok: false,
+      error: "tempo esgotado (5 s) em " + (url ? new URL(url).host : "?"),
+      hint: "Na outra máquina, o servidor do modelo precisa aceitar conexões da rede: Ollama com OLLAMA_HOST=0.0.0.0; LM Studio com \"Serve on Local Network\" ligado. Confira também o firewall.",
+    });
+  }
+  if (provider.apiKeyEnv && !provider.hasApiKey) {
+    throw new MockHttpError(502, {
+      ok: false,
+      error: `sem ${provider.apiKeyEnv} no ambiente do servidor`,
+      hint: docker
+        ? `Defina ${provider.apiKeyEnv} no .env e recrie o container (docker compose up -d).`
+        : `Defina ${provider.apiKeyEnv} no .env e reinicie o servidor.`,
+    });
+  }
+  return { ok: true, latencyMs: 412, models: 12 };
+}
+
+/**
+ * Respostas de fixture para as rotas de provedores em modo `?mock=`. Leitura
+ * devolve os fixtures; gravação altera só a cópia em memória. Nenhuma chave de
+ * API existe aqui: os valores mascarados são literais de demonstração.
+ */
+export function mockRequest(path: string, method: string, body?: string, authorization?: string | null): unknown {
+  const route = path.split("?")[0];
+  const { scenario, admin } = mockParams();
+  const docker = scenario === "docker";
+  const authorized = admin === null || (admin === "token" && !!authorization);
+  const forbid = () => {
+    throw new MockHttpError(403, {
+      error:
+        admin === "token"
+          ? "Esta ação exige o token de administração (ADMIN_TOKEN ou MCP_TOKEN)."
+          : "Só é possível alterar provedores a partir do computador do servidor.",
+      code: "admin_forbidden",
+      adminTokenAccepted: admin === "token",
+    });
+  };
+  const list = providersStore();
+
+  if (route === "/api/providers" && method === "GET") {
+    return {
+      providers: list,
+      profiles: MOCK_PROFILES,
+      presets: MOCK_PRESETS,
+      envKeys: MOCK_ENV_KEYS,
+      canAdmin: authorized,
+      adminTokenAccepted: admin !== "none",
+    };
+  }
+
+  const isAdminRoute = route.startsWith("/api/providers") && (method !== "GET" || /\/models$/.test(route));
+  if (isAdminRoute && !authorized) forbid();
+
   const test = /^\/api\/providers\/([^/]+)\/test$/.exec(route);
   if (test && method === "POST") {
-    const models = MOCK_MODELS[decodeURIComponent(test[1])];
-    return models ? { ok: true, latencyMs: 231, models: models.length } : { ok: false, error: "conexão recusada" };
+    const provider = list.find((p) => p.id === decodeURIComponent(test[1]));
+    if (!provider) throw new MockHttpError(404, { error: "Provedor não encontrado." });
+    return mockTest(provider, docker);
   }
-  const list = /^\/api\/providers\/([^/]+)\/models$/.exec(route);
-  if (list && method === "GET") {
-    return MOCK_MODELS[decodeURIComponent(list[1])] ?? [];
+  const models = /^\/api\/providers\/([^/]+)\/models$/.exec(route);
+  if (models && method === "GET") {
+    return MOCK_MODELS[decodeURIComponent(models[1])] ?? [];
+  }
+  if (route === "/api/providers/preset" && method === "POST") {
+    const req = body ? (JSON.parse(body) as { preset?: string; id?: string }) : {};
+    const preset = req.preset ?? "custom";
+    let id = req.id ?? preset;
+    for (let n = 2; list.some((p) => p.id === id); n++) id = `${req.id ?? preset}-${n}`;
+    list.push({ id, name: preset, kind: preset === "anthropic" ? "anthropic" : "openai", hasApiKey: false, toolMode: "auto", local: true, paid: false, preset });
+    return { id };
+  }
+  const one = /^\/api\/providers\/([^/]+)$/.exec(route);
+  if (one && method === "PUT") {
+    const id = decodeURIComponent(one[1]);
+    const patch = body ? (JSON.parse(body) as Record<string, unknown>) : {};
+    const index = list.findIndex((p) => p.id === id);
+    const current: ProviderPublic =
+      index >= 0 ? list[index] : { id, name: id, kind: "openai", hasApiKey: false, toolMode: "auto", local: false, paid: false };
+    const next: ProviderPublic = { ...current };
+    if (typeof patch.name === "string") next.name = patch.name;
+    if (patch.kind === "openai" || patch.kind === "anthropic") next.kind = patch.kind;
+    if (patch.toolMode === "native" || patch.toolMode === "text" || patch.toolMode === "auto") next.toolMode = patch.toolMode;
+    if (typeof patch.local === "boolean") next.local = patch.local;
+    if (typeof patch.paid === "boolean") next.paid = patch.paid;
+    if ("baseUrl" in patch) next.baseUrl = typeof patch.baseUrl === "string" && patch.baseUrl ? patch.baseUrl : undefined;
+    if ("timeoutMs" in patch) next.timeoutMs = typeof patch.timeoutMs === "number" ? patch.timeoutMs : undefined;
+    if ("apiKeyEnv" in patch) {
+      const env = typeof patch.apiKeyEnv === "string" && patch.apiKeyEnv ? patch.apiKeyEnv : undefined;
+      next.apiKeyEnv = env;
+      next.hasApiKey = !!env && MOCK_ENV_KEYS.includes(env);
+      next.apiKeyMasked = env ? MOCK_ENV_MASKS[env] : undefined;
+    }
+    if (next.baseUrl && isLocalUrl(next.baseUrl) && !("local" in patch)) next.local = true;
+    if (index >= 0) list[index] = next;
+    else list.push(next);
+    return next;
+  }
+  if (one && method === "DELETE") {
+    const id = decodeURIComponent(one[1]);
+    mockProviders = list.filter((p) => p.id !== id);
+    return { ok: true };
   }
   return null;
 }
@@ -804,6 +1010,7 @@ const SCENARIOS: Record<MockScenario, () => { state: GameState; server: ServerIn
   empty: emptyScenario,
   bots: botsScenario,
   botsvsbots: botsVsBotsScenario,
+  docker: dockerScenario,
 };
 
 export function isMockScenario(value: string): value is MockScenario {

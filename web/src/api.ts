@@ -8,20 +8,21 @@
 import { useEffect, useState } from "react";
 import type {
   ApiError as ApiErrorBody,
-  BotProfile,
   Color,
   GameState,
   MessageRequest,
   ModelInfo,
   MoveRequest,
   NewGameRequest,
-  ProviderPublic,
+  ProvidersResponse,
+  ProviderTestResponse,
+  ProviderUpsert,
   ResignRequest,
   ServerInfo,
   TakebackRequest,
   WsServerMessage,
 } from "@shared/types";
-import { mockFixture, mockRequest } from "./dev/fixtures";
+import { MockHttpError, mockFixture, mockRequest } from "./dev/fixtures";
 
 /**
  * `?mock=1` usa o cenário padrão; `?mock=waiting|llmvsllm|finished|empty|bots|botsvsbots`
@@ -35,26 +36,97 @@ const fixture = isMock ? mockFixture(mockParam === "1" ? "default" : (mockParam 
 export class ApiError extends Error {
   readonly status: number;
   readonly legalMoves?: string[];
+  /** "admin_forbidden": rota de administração recusada (403). */
+  readonly code?: string;
+  /** Com `code: "admin_forbidden"`: o servidor aceitaria um token de administração. */
+  readonly adminTokenAccepted?: boolean;
+  /** Dica acionável que alguns erros trazem (ex.: teste de provedor, 502). */
+  readonly hint?: string;
 
-  constructor(status: number, message: string, legalMoves?: string[]) {
+  constructor(
+    status: number,
+    message: string,
+    legalMoves?: string[],
+    extra: { code?: string; adminTokenAccepted?: boolean; hint?: string } = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.legalMoves = legalMoves;
+    this.code = extra.code;
+    this.adminTokenAccepted = extra.adminTokenAccepted;
+    this.hint = extra.hint;
+  }
+
+  get adminForbidden(): boolean {
+    return this.status === 403 && this.code === "admin_forbidden";
   }
 }
 
-function isApiErrorBody(value: unknown): value is Partial<ApiErrorBody> {
+/* ---------------------- token de administração ---------------------- */
+
+/**
+ * Token para as rotas que gravam `providers.json` quando o navegador não está no
+ * mesmo computador do servidor (docs/05 → "Tela Provedores de outro computador").
+ * Fica em `sessionStorage` — some ao fechar a aba — e nunca vai para `localStorage`.
+ */
+const ADMIN_TOKEN_KEY = "xadrez.adminToken";
+
+export function getAdminToken(): string | null {
+  try {
+    const value = window.sessionStorage.getItem(ADMIN_TOKEN_KEY);
+    return value ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setAdminToken(token: string | null): void {
+  try {
+    if (token) window.sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+    else window.sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+  } catch {
+    /* sessionStorage bloqueado: o token vale só para esta chamada */
+  }
+}
+
+function adminHeaders(): Record<string, string> {
+  const token = getAdminToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function isApiErrorBody(value: unknown): value is Partial<ApiErrorBody> & { hint?: unknown } {
   return typeof value === "object" && value !== null;
+}
+
+function toApiError(status: number, body: unknown): ApiError {
+  const parsed = isApiErrorBody(body) ? body : {};
+  const message =
+    typeof parsed.error === "string"
+      ? parsed.error
+      : typeof body === "string" && body
+        ? body
+        : `Erro ${status}`;
+  return new ApiError(status, message, parsed.legalMoves, {
+    code: typeof parsed.code === "string" ? parsed.code : undefined,
+    adminTokenAccepted: typeof parsed.adminTokenAccepted === "boolean" ? parsed.adminTokenAccepted : undefined,
+    hint: typeof parsed.hint === "string" ? parsed.hint : undefined,
+  });
 }
 
 async function request(path: string, init?: RequestInit): Promise<unknown> {
   if (isMock) {
     const method = init?.method ?? "GET";
     console.info(`[mock] ${method} ${path}`, init?.body ?? "");
-    // Os cenários de fixture respondem às rotas de leitura (provedores, modelos,
-    // teste) para que a tela "Provedores" possa ser vista sem servidor.
-    return mockRequest(path, method);
+    // Os cenários de fixture respondem às rotas de provedores (inclusive gravação,
+    // só em memória) para que a tela "Provedores" possa ser vista sem servidor.
+    try {
+      const headers = new Headers(init?.headers);
+      return mockRequest(path, method, typeof init?.body === "string" ? init.body : undefined, headers.get("Authorization"));
+    } catch (err) {
+      if (err instanceof MockHttpError) throw toApiError(err.status, err.body);
+      throw err;
+    }
   }
   let response: Response;
   try {
@@ -72,23 +144,19 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
       body = text;
     }
   }
-  if (!response.ok) {
-    const parsed = isApiErrorBody(body) ? body : {};
-    const message =
-      typeof parsed.error === "string"
-        ? parsed.error
-        : typeof body === "string" && body
-          ? body
-          : `Erro ${response.status}`;
-    throw new ApiError(response.status, message, parsed.legalMoves);
-  }
+  if (!response.ok) throw toApiError(response.status, body);
   return body;
 }
 
-function send(method: "POST" | "PUT" | "DELETE", path: string, payload?: unknown): Promise<unknown> {
+function send(
+  method: "POST" | "PUT" | "DELETE",
+  path: string,
+  payload?: unknown,
+  extraHeaders: Record<string, string> = {},
+): Promise<unknown> {
   return request(path, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
     body: JSON.stringify(payload ?? {}),
   });
 }
@@ -105,18 +173,7 @@ export interface BotSeatBody {
   name?: string;
 }
 
-export interface ProvidersResponse {
-  providers: ProviderPublic[];
-  profiles: BotProfile[];
-  presets: string[];
-}
-
-export interface ProviderTestResult {
-  ok: boolean;
-  latencyMs?: number;
-  models?: number;
-  error?: string;
-}
+export type { ProvidersResponse, ProviderTestResponse, ProviderUpsert };
 
 export const api = {
   /** Lance pelo assento humano da vez. `move` em UCI (ex.: "e7e8q") ou SAN. */
@@ -170,33 +227,50 @@ export const api = {
    * chave de API: o servidor devolve só `hasApiKey`/`apiKeyMasked`.
    */
   providers: {
+    /** Manda o token de administração, se houver, para o servidor calcular `canAdmin`. */
     async list(): Promise<ProvidersResponse> {
-      const body = (await request("/api/providers")) as ProvidersResponse | null;
+      const body = (await request("/api/providers", { headers: adminHeaders() })) as ProvidersResponse | null;
       return body ?? { providers: [], profiles: [], presets: [] };
     },
-    async test(id: string): Promise<ProviderTestResult> {
+    /**
+     * Teste de conexão. Falha do provedor (502) vira `{ ok: false, error, hint? }`;
+     * recusa de administração (403) e falta de servidor continuam lançando `ApiError`.
+     */
+    async test(id: string): Promise<ProviderTestResponse> {
       try {
-        const body = (await post(`/api/providers/${encodeURIComponent(id)}/test`, {})) as ProviderTestResult | null;
-        return body ?? { ok: true };
+        const body = (await send("POST", `/api/providers/${encodeURIComponent(id)}/test`, {}, adminHeaders())) as
+          | ProviderTestResponse
+          | null;
+        return body ?? { ok: true, latencyMs: 0 };
       } catch (err) {
-        if (err instanceof ApiError) return { ok: false, error: err.message };
+        if (err instanceof ApiError && !err.adminForbidden && err.status !== 0) {
+          return err.hint ? { ok: false, error: err.message, hint: err.hint } : { ok: false, error: err.message };
+        }
         throw err;
       }
     },
     async models(id: string, refresh = false): Promise<ModelInfo[]> {
       const query = refresh ? "?refresh=1" : "";
-      const body = (await request(`/api/providers/${encodeURIComponent(id)}/models${query}`)) as ModelInfo[] | null;
+      const body = (await request(`/api/providers/${encodeURIComponent(id)}/models${query}`, {
+        headers: adminHeaders(),
+      })) as ModelInfo[] | null;
       return body ?? [];
     },
-    /** Grava `baseUrl`/`apiKeyEnv`/flags. Nunca `apiKey` — o servidor recusa. */
-    async save(id: string, patch: Record<string, unknown>): Promise<void> {
-      await send("PUT", `/api/providers/${encodeURIComponent(id)}`, patch);
+    /**
+     * Cria ou atualiza (`PUT` é upsert). Só campos sem segredo: `null` limpa
+     * `baseUrl`/`apiKeyEnv`/`timeoutMs`. Nunca `apiKey` — o servidor recusa.
+     */
+    async save(id: string, patch: ProviderUpsert): Promise<void> {
+      await send("PUT", `/api/providers/${encodeURIComponent(id)}`, patch, adminHeaders());
     },
-    async addPreset(preset: string, id?: string): Promise<void> {
-      await post("/api/providers/preset", id ? { preset, id } : { preset });
+    /** Sem `id`, o servidor escolhe um livre (sufixo `-2`, `-3`…) em vez de devolver 409. */
+    async addPreset(preset: string, id?: string): Promise<string | null> {
+      const body = await send("POST", "/api/providers/preset", id ? { preset, id } : { preset }, adminHeaders());
+      if (typeof body === "object" && body !== null && "id" in body && typeof body.id === "string") return body.id;
+      return null;
     },
     async remove(id: string): Promise<void> {
-      await send("DELETE", `/api/providers/${encodeURIComponent(id)}`);
+      await send("DELETE", `/api/providers/${encodeURIComponent(id)}`, undefined, adminHeaders());
     },
   },
 

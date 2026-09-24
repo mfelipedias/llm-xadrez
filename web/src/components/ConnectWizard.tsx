@@ -6,7 +6,8 @@
  * mostra os quatro passos, com detecção automática do progresso:
  *
  *  1. servidor no ar      ← WebSocket conectado
- *  2. cliente registrado  ← `server.mcpSessions` ganhou uma sessão (mesmo sem assento)
+ *  2. cliente registrado  ← `server.mcpSessions` tem uma sessão ativa (mesmo sem assento;
+ *                           as marcadas `active: false` estão para expirar e não contam)
  *  3. aula pedida no chat ← a sessão sentou num assento
  *  4. IA na partida       ← idem; aqui o painel se fecha
  *
@@ -15,52 +16,20 @@
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Color, GameState, ServerInfo } from "@shared/types";
+import { activeSessions, chatPrompt, CLIENTS, connectContext, snippetFor, TOKEN_PLACEHOLDER, type Client } from "../connect";
 import { isAiSeat } from "../status";
 import { CopyButton } from "./CopyButton";
 
-type Client = "code" | "desktop" | "other";
-
 const CLIENT_KEY = "xadrez.client";
-
-const CLIENTS: { id: Client; label: string }[] = [
-  { id: "code", label: "Claude Code" },
-  { id: "desktop", label: "Claude Desktop" },
-  { id: "other", label: "Outro" },
-];
-
-const CHAT_PROMPT = "vamos jogar xadrez, eu de brancas, me ensine";
 
 function readClient(): Client {
   try {
     const value = window.localStorage.getItem(CLIENT_KEY);
-    if (value === "code" || value === "desktop" || value === "other") return value;
+    if (CLIENTS.some((c) => c.id === value)) return value as Client;
   } catch {
     /* localStorage bloqueado */
   }
   return "code";
-}
-
-function snippetFor(client: Client, mcpUrl: string): { code: string; note: string } {
-  if (client === "desktop") {
-    return {
-      code: JSON.stringify(
-        { mcpServers: { xadrez: { command: "npx", args: ["-y", "mcp-remote", mcpUrl, "--allow-http"] } } },
-        null,
-        2,
-      ),
-      note: "Cole em claude_desktop_config.json e reinicie o app.",
-    };
-  }
-  if (client === "other") {
-    return {
-      code: `npx -y mcp-remote ${mcpUrl} --allow-http`,
-      note: "Clientes com MCP por HTTP aceitam a URL direto; os de stdio usam esta ponte.",
-    };
-  }
-  return {
-    code: `claude mcp add --transport http xadrez ${mcpUrl}`,
-    note: "Cole no terminal, em qualquer pasta, e abra o claude.",
-  };
 }
 
 export interface ConnectWizardProps {
@@ -74,10 +43,12 @@ export interface ConnectWizardProps {
 
 export function ConnectWizard({ state, server, wsConnected, onOpenHelp, onNewGame }: ConnectWizardProps) {
   const [client, setClient] = useState<Client>(readClient);
-  const sessions = server?.mcpSessions ?? [];
+  const sessions = activeSessions(server);
   const seated = (["white", "black"] as Color[]).some((c) => isAiSeat(state.seats[c]));
   const registered = sessions.length > 0;
-  const mcpUrl = server?.mcpUrl ?? "";
+  const ctx = connectContext(server);
+  const { mcpUrl, docker } = ctx;
+  const prompt = chatPrompt(state);
 
   useEffect(() => {
     try {
@@ -103,7 +74,7 @@ export function ConnectWizard({ state, server, wsConnected, onOpenHelp, onNewGam
     return () => window.clearInterval(timer);
   }, [registered, seated]);
 
-  const { code, note } = snippetFor(client, mcpUrl);
+  const { code, note } = snippetFor(client, ctx);
   const sessionName = sessions[0]?.name ?? "O cliente";
 
   const steps: { done: boolean; current: boolean; title: string; body: ReactNode }[] = [
@@ -112,7 +83,13 @@ export function ConnectWizard({ state, server, wsConnected, onOpenHelp, onNewGam
       current: !wsConnected,
       title: "Servidor no ar",
       body: wsConnected ? (
-        <p className="wiz-note">Este navegador está falando com o servidor local.</p>
+        <p className="wiz-note">
+          Este navegador está falando com o servidor{docker ? " (rodando em Docker)" : ""}.
+        </p>
+      ) : docker ? (
+        <p className="wiz-note">
+          Servidor parado? Rode <code>docker compose up -d</code> na pasta do projeto.
+        </p>
       ) : (
         <p className="wiz-note">
           Servidor parado? Rode <code>npm start</code> (ou <code>npm run dev</code>) na pasta do projeto.
@@ -146,6 +123,12 @@ export function ConnectWizard({ state, server, wsConnected, onOpenHelp, onNewGam
             <CopyButton text={code} className="snippet-copy" />
           </div>
           <p className="wiz-note">{note}</p>
+          {ctx.token && (
+            <p className="wiz-note">
+              Este servidor exige token (<code>MCP_TOKEN</code>). Esta página não sabe o valor: ele está no{" "}
+              <code>.env</code> do servidor. Troque <code>{TOKEN_PLACEHOLDER}</code> por ele.
+            </p>
+          )}
           <p className="wiz-note">
             Endereço do servidor: <code>{mcpUrl}</code> <CopyButton text={mcpUrl} label="Copiar URL" />
           </p>
@@ -164,9 +147,9 @@ export function ConnectWizard({ state, server, wsConnected, onOpenHelp, onNewGam
         <>
           <div className="snippet">
             <pre>
-              <code>{CHAT_PROMPT}</code>
+              <code>{prompt}</code>
             </pre>
-            <CopyButton text={CHAT_PROMPT} className="snippet-copy" />
+            <CopyButton text={prompt} className="snippet-copy" />
           </div>
           {stalled && (
             <p className="wiz-warn">

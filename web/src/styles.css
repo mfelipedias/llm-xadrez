@@ -2543,3 +2543,144 @@ select:focus-visible,
     scroll-behavior: auto;
   }
 }
+
+/* ----- provedores: formulário novo/edição, teste e administração ----- */
+.prov-new {
+  margin-top: var(--sp-4);
+}
+
+.prov-new .prov-editor {
+  margin-top: var(--sp-2);
+  padding-top: 0;
+  border-top: 0;
+}
+
+.prov-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-2) var(--sp-3);
+}
+
+.prov-fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.prov-templates {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.prov-editor .form-hint,
+.prov-editor .form-error {
+  margin: 0;
+}
+
+.prov-env {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.prov-env.is-ok {
+  color: var(--good);
+}
+
+.prov-env.is-bad {
+  color: var(--attn);
+}
+
+.prov-test {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+}
+
+.prov-test.is-ok {
+  color: var(--good);
+}
+
+.prov-test.is-bad {
+  padding: var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--threat);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklab, var(--threat) 10%, var(--surface));
+  color: var(--text);
+}
+
+.prov-test-error {
+  margin: 0;
+  color: var(--threat);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.prov-test-hint {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-md);
+  line-height: var(--lh-ui);
+  overflow-wrap: anywhere;
+}
+
+.prov-admin {
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-3);
+  border-left: 3px solid var(--attn);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklab, var(--attn) 10%, var(--surface));
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.prov-admin p,
+.prov-admin ul {
+  margin: 0 0 var(--sp-2);
+}
+
+.prov-admin ul {
+  padding-left: var(--sp-5);
+}
+
+.prov-admin > :last-child {
+  margin-bottom: 0;
+}
+
+.prov-admin-title {
+  font-weight: 600;
+  font-size: var(--fs-md);
+}
+
+.prov-admin-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.prov-admin-row .form-field {
+  flex: 1 1 220px;
+}
+
+.prov-admin input {
+  font: inherit;
+  font-size: var(--fs-md);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  min-height: 36px;
+  min-width: 0;
+}
+
+.prov-add {
+  flex-wrap: wrap;
+}
+
+.prov-editor [aria-invalid="true"] {
+  border-color: var(--threat);
+}
