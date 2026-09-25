@@ -7,7 +7,7 @@
  *  - `system` vira bloco de texto com `cache_control: { type: "ephemeral" }` — o prompt de
  *    sistema é estável durante a partida, então cada lance lê o prefixo do cache;
  *  - `thinking: { type: "adaptive" }` + `output_config: { effort: "low" }` nos modelos que
- *    aceitam (escolher um lance não precisa de raciocínio caro);
+ *    aceitam (escolher um lance não precisa de raciocínio caro); `thinking: "off"` tira os dois;
  *  - blocos `tool_use` da resposta viram `ToolCall`, e os `tool` results da interface voltam
  *    como blocos `tool_result` **numa única mensagem `user`** (exigência do formato);
  *  - `tool_choice` nunca é `any`/`tool` (o Fable 5.1 devolve 400): só `auto` ou `none`;
@@ -546,6 +546,11 @@ export function createAnthropicProvider(cfg: ProviderConfig, opts: AnthropicOpti
     if (!adaptive) {
       const thinking = body.thinking as { type?: unknown } | undefined;
       if (thinking && thinking.type === "adaptive") delete body.thinking;
+      delete body.output_config;
+    }
+    // Sem `thinking` o modelo responde direto; o `effort` do plano deixa de fazer sentido.
+    if (req.thinking === "off") {
+      delete body.thinking;
       delete body.output_config;
     }
 

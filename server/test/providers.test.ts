@@ -279,6 +279,61 @@ describe("openai-compat — chat()", () => {
     expect(res.text).toBe("MOVE: e4\nCOMMENT: Ocupo o centro.");
   });
 
+  it("thinking off: manda os dialetos conhecidos e /no_think no system dos Qwen3", async () => {
+    const { fetchImpl, calls } = mockFetch([json(LMSTUDIO_TEXT)]);
+    const provider = createOpenAiCompatProvider(lmstudioCfg, { fetchImpl });
+    await provider.chat({ ...baseRequest, model: "qwen3-8b", thinking: "off" });
+
+    const [call] = calls;
+    expect(call.body.reasoning_effort).toBe("none");
+    expect(call.body.chat_template_kwargs).toEqual({ enable_thinking: false });
+    const messages = call.body.messages as { role: string; content: string }[];
+    expect(messages[0].content).toBe("Você é professora de xadrez.\n/no_think");
+    expect(messages[1].content).not.toContain("/no_think");
+  });
+
+  it("thinking off no OpenRouter: sobrescreve o effort do extraBody, sem reasoning_effort solto", async () => {
+    const { fetchImpl, calls } = mockFetch([json(OPENROUTER_TOOL_CALL)]);
+    const provider = createOpenAiCompatProvider(openrouterCfg, { fetchImpl, apiKey: "sk-or-v1-x" });
+    await provider.chat({ ...baseRequest, thinking: "off" });
+
+    const [call] = calls;
+    expect(call.body.reasoning).toEqual({ effort: "none" });
+    expect(call.body.reasoning_effort).toBeUndefined();
+    expect(call.body.usage).toEqual({ include: true });
+    expect((call.body.messages as { content: string }[])[0].content).not.toContain("/no_think");
+  });
+
+  it("thinking off recusado (400): refaz sem os campos e não manda mais para o modelo", async () => {
+    const { fetchImpl, calls } = mockFetch([
+      () =>
+        new Response(JSON.stringify({ error: { message: "reasoning_effort: invalid value" } }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+      () => json(LMSTUDIO_TEXT),
+    ]);
+    const provider = createOpenAiCompatProvider(lmstudioCfg, { fetchImpl });
+    const res = await provider.chat({ ...baseRequest, model: "qwen3-8b", thinking: "off" });
+    expect(res.finishReason).toBe("stop");
+    await provider.chat({ ...baseRequest, model: "qwen3-8b", thinking: "off" });
+
+    expect(calls).toHaveLength(3);
+    expect(calls[0].body.reasoning_effort).toBe("none");
+    for (const call of calls.slice(1)) {
+      expect(call.body.reasoning_effort).toBeUndefined();
+      expect(call.body.chat_template_kwargs).toBeUndefined();
+    }
+  });
+
+  it("sem thinking off o corpo não ganha campos de raciocínio", async () => {
+    const { fetchImpl, calls } = mockFetch([json(LMSTUDIO_TEXT)]);
+    const provider = createOpenAiCompatProvider(lmstudioCfg, { fetchImpl });
+    await provider.chat({ ...baseRequest, model: "qwen3-8b" });
+    expect(calls[0].body.reasoning_effort).toBeUndefined();
+    expect(calls[0].body.chat_template_kwargs).toBeUndefined();
+  });
+
   it("429 com retry-after vira ProviderError retentável", async () => {
     const { fetchImpl } = mockFetch([
       () =>

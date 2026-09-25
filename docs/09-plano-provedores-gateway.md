@@ -363,6 +363,11 @@ Prompt é **estável durante a partida** (sem timestamps) para aproveitar cache 
   (default 4 rodadas ≈ 8–12 mensagens) + rodada atual. Isso mantém o custo por lance
   ~constante (≈ 2–4k tokens de entrada) mesmo em partidas longas, e dá ao modelo memória
   dos próprios comentários recentes (continuidade da aula). `historyTurns: 0` = stateless.
+- **Histórico compacto** (`compactRound` em `bots/player.ts`): a rodada guardada perde o
+  estado (a mensagem do evento fica só com o prefixo e as mensagens do aluno; cada resultado
+  de tool, só com a 1ª linha). Uma rodada antiga cai de ~850 para ~120 tokens. O bot também
+  não recebe o tabuleiro ASCII (FEN + lista de peças bastam) nem a tool `get_state`.
+  Medido num lance de meio-jogo: ~5,5k → ~2,5k tokens de entrada por chamada.
 
 ### 3.4 Lance ilegal
 
@@ -454,8 +459,20 @@ bot pode chamar `end_game(how: "draw")`.
 ### 4.2 Perfil de bot (`BotProfile`)
 
 Separa "provedor" (onde) de "perfil" (como): `{ id, name, providerId, model, role,
-level, temperature, toolMode?, historyTurns, limits }`. A UI escolhe um perfil por
+level, temperature, toolMode?, historyTurns, thinking?, limits }`. A UI escolhe um perfil por
 assento; perfis rápidos podem ser criados inline no diálogo ("provedor + modelo").
+
+`thinking: "off"` (caixa "Jogar sem pensar" no diálogo, que vale por assento e sobrescreve
+o perfil) pede resposta sem raciocínio. Cada adaptador traduz para o dialeto do provedor:
+
+| Adaptador | O que vai na requisição |
+|-----------|-------------------------|
+| Anthropic | tira `thinking` e `output_config` |
+| OpenAI-compatível | `reasoning.effort: "none"` quando o `extraBody` traz `reasoning` (OpenRouter), senão `reasoning_effort: "none"` (Ollama); `chat_template_kwargs.enable_thinking: false` (llama.cpp, vLLM, SGLang); `/no_think` no system dos modelos `qwen3` (LM Studio) |
+
+Se o servidor recusar os campos (400/422), a chamada é refeita sem eles e aquele modelo
+não os recebe mais até o servidor reiniciar. Modelos só de raciocínio (ex.: variantes
+"thinking") podem ignorar o pedido.
 
 ### 4.3 UI
 
@@ -689,7 +706,7 @@ throttle de 500 ms, como antes do plano 09, e passou a incluir `providers`, `pro
 | Risco | Impacto | Mitigação |
 |-------|---------|-----------|
 | Modelos locais pequenos jogam mal e "ensinam" errado | qualidade de aula ruim; lances ilegais frequentes | modo texto + lista de lances legais; métrica `illegalMoves` visível; presets recomendam ≥ 8B com tools; rótulo "qualidade experimental" na UI; futuro: `analyze` com Stockfish (fase 3 do roadmap) para o bot checar-se |
-| Latência de modelos locais em CPU (30–120 s/lance) | experiência lenta | status "pensando… Ns" com tempo; `turnTimeoutMs` alto para locais; `historyTurns` baixo reduz prompt; sugerir modelos quantizados |
+| Latência de modelos locais em CPU (30–120 s/lance) | experiência lenta | status "pensando… Ns" com tempo; `turnTimeoutMs` alto para locais; `historyTurns` baixo reduz prompt; `thinking: "off"` corta o raciocínio; sugerir modelos quantizados |
 | Formatos de tool calling divergem (args string vs objeto, ids ausentes, `tool_choice` não suportado, `<think>`) | falhas silenciosas | flags por provedor + parser tolerante + validação zod; testes unitários com fixtures reais de cada provedor |
 | OpenRouter roteia para provedores diferentes por chamada | comportamento variável | `provider.order`/`allow_fallbacks` no `extraBody` do preset (opcional) |
 | Custo inesperado (loop de lances ilegais, comentários longos) | dinheiro | limites por rodada/partida, `maxIterationsPerTurn`, `max_tokens` 1–4k, aviso de custo |

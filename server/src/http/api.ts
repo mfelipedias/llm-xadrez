@@ -221,6 +221,7 @@ export function createApiRouter(deps: ApiDeps): Router {
       usage: emptyBotUsage(),
     };
     if (req.profileId) bot.profileId = req.profileId;
+    if ((req.thinking ?? profile?.thinking) === "off") bot.thinking = "off";
     return { kind: "bot", name: name?.trim() || profile?.name || `${providerId}/${model}`, bot };
   }
 
@@ -580,6 +581,7 @@ export function createApiRouter(deps: ApiDeps): Router {
     if (name) out.name = name;
     if (body.role === "teacher" || body.role === "opponent" || body.role === "silent") out.role = body.role;
     if (body.level === "beginner" || body.level === "intermediate" || body.level === "advanced") out.level = body.level;
+    if (body.thinking === "default" || body.thinking === "off") out.thinking = body.thinking;
     return out;
   }
 

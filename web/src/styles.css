@@ -2335,6 +2335,29 @@ select:focus-visible,
   color: var(--threat);
 }
 
+.botpicker-thinking {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  min-height: var(--tap);
+  font-size: var(--fs-sm);
+}
+
+.botpicker-thinking input {
+  min-height: auto;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  flex: none;
+  accent-color: var(--ink);
+}
+
+.botpicker-thinking small {
+  display: block;
+  color: var(--text-muted);
+}
+
 .cost-warning {
   margin: 0;
   padding: var(--sp-2) var(--sp-3);

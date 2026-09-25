@@ -6,6 +6,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GameStore } from "../src/game/store.js";
 import { createMcpRouter, safeTokenEqual, type McpRouterHandle, type McpTransportOptions } from "../src/mcp/transport.js";
@@ -128,6 +129,29 @@ describe("MCP HTTP — token", () => {
     // Requisições seguintes da sessão também podem usar ?token=.
     const list = await request(port, "POST", "/mcp?token=segredo-123", { "mcp-session-id": query.sessionId!, "mcp-protocol-version": "2025-06-18" }, { jsonrpc: "2.0", method: "notifications/initialized" });
     expect(list.status).toBe(202);
+  });
+});
+
+describe("MCP HTTP — tools/list", () => {
+  it("esquemas sem $schema draft-07 e válidos para um validador 2020-12 (Claude Desktop)", async () => {
+    const { port } = await start();
+    const { sessionId } = await initialize(port);
+    const headers = { "mcp-session-id": sessionId ?? "", "mcp-protocol-version": "2025-06-18" };
+    await request(port, "POST", "/mcp", headers, { jsonrpc: "2.0", method: "notifications/initialized" });
+    const res = await request(port, "POST", "/mcp", headers, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+    const line = res.body.split("\n").find((l) => l.startsWith("data: "));
+    const tools = (JSON.parse(line?.slice(6) ?? "{}") as { result: { tools: Record<string, Record<string, unknown>>[] } }).result.tools;
+    expect(tools.length).toBeGreaterThan(5);
+
+    const ajv = new Ajv2020({ strict: false });
+    for (const tool of tools) {
+      for (const key of ["inputSchema", "outputSchema"]) {
+        const schema = tool[key];
+        if (!schema) continue;
+        expect(schema, `${String(tool.name)}.${key}`).not.toHaveProperty("$schema");
+        expect(() => ajv.compile(schema), `${String(tool.name)}.${key}`).not.toThrow();
+      }
+    }
   });
 });
 

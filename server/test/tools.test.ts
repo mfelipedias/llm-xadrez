@@ -110,7 +110,7 @@ describe("tools — humano vs LLM", () => {
     }
     const r = toolMakeMove(c, makeMoveArgs.parse({ move: "Qxf7" }));
     expect(r.isError).toBeUndefined();
-    expect(text(r)).toContain("Você jogou 4. Qxf7#. Xeque-mate! 1-0 — xeque-mate: você venceu. Partida encerrada.");
+    expect(text(r)).toContain("Você jogou 4. Qxf7#. Xeque-mate! 1-0 — xeque-mate: brancas (Claude) venceram; você jogou de brancas e venceu. Partida encerrada.");
     expect((r.structuredContent as unknown as GameState).status).toBe("finished");
   });
 

@@ -25,6 +25,12 @@ export interface BotUsage {
   illegalMoves: number;
 }
 
+/**
+ * Raciocínio do modelo: `default` deixa como o provedor/modelo vier; `off` pede resposta
+ * direta, sem a fase de "pensar" (modelos locais podem levar minutos pensando num lance).
+ */
+export type ThinkingMode = "default" | "off";
+
 /** Informação exibida/persistida de um assento `bot`. Nunca contém chaves de API. */
 export interface BotSeatInfo {
   /** Id do provedor em providers.json, ex.: "openrouter". */
@@ -33,6 +39,8 @@ export interface BotSeatInfo {
   model: string;
   profileId?: string;
   toolMode: "native" | "text";
+  /** Ausente = `default`. */
+  thinking?: ThinkingMode;
   status: BotStatus;
   /** Texto curto para a UI: "chave inválida", "429: aguardando 4 s"... */
   statusText?: string;
@@ -284,6 +292,8 @@ export type SeatRequest =
       name?: string;
       role?: BotRole;
       level?: StudentLevel;
+      /** Sobrescreve o `thinking` do perfil. */
+      thinking?: ThinkingMode;
     };
 
 export interface NewGameRequest {
@@ -371,6 +381,8 @@ export interface BotProfile {
   temperature?: number;
   toolMode?: "native" | "text";
   historyTurns?: number;
+  /** Ausente = `default`. */
+  thinking?: ThinkingMode;
   limits?: BotLimits;
 }
 

@@ -503,7 +503,8 @@ export function App() {
   const botChoice = (color: Color): BotChoice => {
     const bot = state.seats[color].bot;
     if (!bot) return {};
-    return bot.profileId ? { profileId: bot.profileId } : { providerId: bot.providerId, model: bot.model };
+    const thinking = bot.thinking ?? "default";
+    return bot.profileId ? { profileId: bot.profileId, thinking } : { providerId: bot.providerId, model: bot.model, thinking };
   };
 
   const plateProps = (color: Color) => ({

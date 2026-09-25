@@ -10,8 +10,18 @@
       "paid": true,
       "toolMode": "native",
       "modelsQuery": "supported_parameters=tools",
-      "extraHeaders": { "HTTP-Referer": "http://localhost:3939", "X-Title": "LLM Xadrez" },
-      "extraBody": { "usage": { "include": true }, "reasoning": { "effort": "low" } },
+      "extraHeaders": {
+        "HTTP-Referer": "http://localhost:3939",
+        "X-Title": "LLM Xadrez"
+      },
+      "extraBody": {
+        "usage": {
+          "include": true
+        },
+        "reasoning": {
+          "effort": "low"
+        }
+      },
       "timeoutMs": 60000
     },
     {
@@ -21,7 +31,14 @@
       "apiKeyEnv": "ANTHROPIC_API_KEY",
       "paid": true,
       "toolMode": "native",
-      "extraBody": { "thinking": { "type": "adaptive" }, "output_config": { "effort": "low" } }
+      "extraBody": {
+        "thinking": {
+          "type": "adaptive"
+        },
+        "output_config": {
+          "effort": "low"
+        }
+      }
     },
     {
       "id": "lmstudio",
@@ -49,6 +66,15 @@
       "baseUrl": "http://localhost:4000/v1",
       "apiKeyEnv": "LITELLM_API_KEY",
       "toolMode": "native"
+    },
+    {
+      "id": "ubuntu-server",
+      "name": "Ubuntu Server",
+      "kind": "openai",
+      "baseUrl": "http://100.75.86.69:18085/v1",
+      "toolMode": "auto",
+      "local": false,
+      "paid": false
     }
   ],
   "profiles": [
@@ -61,7 +87,11 @@
       "level": "beginner",
       "temperature": 0.7,
       "historyTurns": 4,
-      "limits": { "maxUsdPerGame": 1.0, "maxTokensPerGame": 400000, "maxIterationsPerTurn": 6 }
+      "limits": {
+        "maxUsdPerGame": 1,
+        "maxTokensPerGame": 400000,
+        "maxIterationsPerTurn": 6
+      }
     },
     {
       "id": "opus-direto",
@@ -70,7 +100,9 @@
       "model": "claude-opus-5",
       "role": "teacher",
       "level": "intermediate",
-      "limits": { "maxUsdPerGame": 2.0 }
+      "limits": {
+        "maxUsdPerGame": 2
+      }
     },
     {
       "id": "local-qwen",
@@ -82,11 +114,16 @@
       "toolMode": "text",
       "temperature": 0.3,
       "historyTurns": 2,
-      "limits": { "maxIterationsPerTurn": 4 }
+      "limits": {
+        "maxIterationsPerTurn": 4
+      }
     }
   ],
   "defaults": {
     "profileId": "professora-sonnet",
-    "onMoveFailure": { "vsHuman": "pause", "vsBot": "random_legal" }
+    "onMoveFailure": {
+      "vsHuman": "pause",
+      "vsBot": "random_legal"
+    }
   }
 }

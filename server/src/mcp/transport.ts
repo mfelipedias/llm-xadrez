@@ -10,17 +10,42 @@
  *   fechadas — nunca enquanto têm um `wait_for_turn` pendente.
  * - `initialize` com um Mcp-Session-Id velho (servidor reiniciou, sessão varrida) abre uma sessão
  *   nova em vez de devolver 404.
+ * - `tools/list` sai sem `$schema` nos esquemas (ver `stripSchemaDialect`).
  */
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { isInitializeRequest, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { GameStore } from "../game/store.js";
 import { createMcpServer, type McpServerOptions, type SessionRef } from "./server.js";
 import { createLogger } from "../log.js";
 
 const log = createLogger("mcp");
+
+/**
+ * O SDK (1.30) converte os shapes zod com `target: "draft-7"` e carimba
+ * `"$schema": "http://json-schema.org/draft-07/schema#"` em `inputSchema`/`outputSchema`.
+ * Clientes MCP novos (Claude Desktop 2026-09) validam só 2020-12 e recusam a tool inteira
+ * ("unsupported dialect"). Sem o `$schema` vale o dialeto padrão da spec (2020-12), e os
+ * esquemas gerados pelo zod não usam nada exclusivo do draft-07.
+ */
+export function stripSchemaDialect(message: JSONRPCMessage): JSONRPCMessage {
+  const result = (message as { result?: { tools?: unknown } }).result;
+  if (!result || !Array.isArray(result.tools)) return message;
+  const tools = (result.tools as Record<string, unknown>[]).map((tool) => {
+    const out = { ...tool };
+    for (const key of ["inputSchema", "outputSchema"] as const) {
+      const schema = out[key];
+      if (schema && typeof schema === "object" && "$schema" in schema) {
+        const { $schema: _dialect, ...rest } = schema as Record<string, unknown>;
+        out[key] = rest;
+      }
+    }
+    return out;
+  });
+  return { ...message, result: { ...result, tools } } as JSONRPCMessage;
+}
 
 /** Default de `sessionIdleMs`: 30 min sem requisição => a sessão é fechada. */
 export const DEFAULT_MCP_SESSION_IDLE_MS = 30 * 60_000;
@@ -132,6 +157,8 @@ export function createMcpRouter(store: GameStore, opts: McpTransportOptions): Mc
       if (ref.id) store.sessionClosed(ref.id);
     };
     transport.onerror = (err) => log.warn(`erro no transporte ${ref.id.slice(0, 8) || "(nova)"}: ${err.message}`);
+    const send = transport.send.bind(transport);
+    transport.send = (message, options) => send(stripSchemaDialect(message), options);
     const server = createMcpServer(store, ref, opts);
     entry.transport = transport;
     entry.server = server;

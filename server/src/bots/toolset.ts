@@ -53,10 +53,13 @@ const DESCRIPTIONS: Record<BotToolName, string> = {
   end_game: 'End the game: "resign" (your color loses) or "draw" (agreed draw; also accepts a pending draw offer).',
 };
 
-/** Ordem em que as tools são anunciadas ao provedor (a 1ª é a mais importante). */
-export const MOVE_TOOLS: BotToolName[] = ["make_move", "comment", "highlight", "get_state", "end_game"];
+/**
+ * Ordem em que as tools são anunciadas ao provedor (a 1ª é a mais importante). `get_state`
+ * fica de fora: toda mensagem do bot já traz o estado, e anunciá-la custa tokens em toda chamada.
+ */
+export const MOVE_TOOLS: BotToolName[] = ["make_move", "comment", "highlight", "end_game"];
 /** Rodada de resposta a uma mensagem do aluno / comentário do resultado: não se joga. */
-export const TALK_TOOLS: BotToolName[] = ["comment", "highlight", "get_state"];
+export const TALK_TOOLS: BotToolName[] = ["comment", "highlight"];
 
 function jsonSchema(name: BotToolName): Record<string, unknown> {
   const schema = z.toJSONSchema(z.object(SHAPES[name]), { io: "input" }) as Record<string, unknown>;

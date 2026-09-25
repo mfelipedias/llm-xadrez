@@ -180,6 +180,15 @@ describe("anthropic — chat()", () => {
     expect(body.temperature).toBe(0.3);
   });
 
+  it("thinking off tira thinking adaptativo e effort", async () => {
+    const { client, bodies } = mockSdk([TOOL_USE_REPLY]);
+    const provider = createAnthropicProvider(anthropicCfg(), { client });
+    await provider.chat(request({ thinking: "off" }));
+
+    expect(bodies[0]).not.toHaveProperty("thinking");
+    expect(bodies[0]).not.toHaveProperty("output_config");
+  });
+
   it("traduz tool_use, uso e custo (incluindo tokens lidos do cache)", async () => {
     const { client } = mockSdk([TOOL_USE_REPLY]);
     const provider = createAnthropicProvider(anthropicCfg(), { client });

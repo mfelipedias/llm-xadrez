@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { GameStore } from "../src/game/store.js";
-import { describeMove, formatHistory, formatStateForLLM, formatTurnEvent } from "../src/game/format.js";
+import { describeMove, formatHistory, formatStateForLLM, formatTurnEvent, resultText } from "../src/game/format.js";
 import type { GameState } from "../../shared/types.js";
 
 function fixState(state: GameState): GameState {
@@ -98,8 +98,19 @@ describe("formatStateForLLM", () => {
     for (const [c, m] of [["white", "f3"], ["black", "e5"], ["white", "g4"], ["black", "Qh4#"]] as const) store.applyMove(c, m);
     const text = formatStateForLLM(fixState(store.getState()), "black");
     expect(text).toContain("encerrada após 4 meio-lances (0-1)");
-    expect(text).toContain("xeque-mate: você venceu");
+    expect(text).toContain("xeque-mate: pretas (Claude) venceram; você jogou de pretas e venceu");
     expect(text).toContain("Lances legais: nenhum (partida encerrada).");
+  });
+
+  it("resultado nomeia o vencedor para quem perdeu e para o espectador", () => {
+    const store = new GameStore();
+    store.newGame({ seats: { white: { kind: "human", name: "Marcos" }, black: { kind: "mcp", name: "Claude", sessionId: "s1" } } });
+    for (const [c, m] of [["white", "e4"], ["black", "e5"], ["white", "Bc4"], ["black", "Nc6"], ["white", "Qh5"], ["black", "Nf6"], ["white", "Qxf7#"]] as const) {
+      store.applyMove(c, m);
+    }
+    const state = fixState(store.getState());
+    expect(resultText(state, "black")).toBe("1-0 — xeque-mate: brancas (Marcos) venceram; você jogou de pretas e perdeu");
+    expect(resultText(state, null)).toBe("1-0 — xeque-mate: brancas (Marcos) venceram");
   });
 
   it("mostra os últimos 3 comentários do oponente LLM (modo LLM vs LLM)", () => {

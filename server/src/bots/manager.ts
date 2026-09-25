@@ -5,7 +5,7 @@
  * bots, responde ao `POST /api/game` com `seats` (via `BotSeatingHook`) e às rotas
  * `/api/bots/*`. O `GameStore` só recebe `SeatInit { kind: "bot", sessionId, bot }`.
  */
-import type { BotRole, BotSeatInfo, Color, GameState, SeatRequest, StudentLevel, ToolMode } from "../../../shared/types.js";
+import type { BotRole, BotSeatInfo, Color, GameState, SeatRequest, StudentLevel, ThinkingMode, ToolMode } from "../../../shared/types.js";
 import type { GameStore, SeatInit } from "../game/store.js";
 import type { Lang } from "../game/format.js";
 import { createLogger } from "../log.js";
@@ -47,6 +47,7 @@ interface ResolvedBot {
   level: StudentLevel;
   temperature?: number;
   toolMode: ToolMode;
+  thinking: ThinkingMode;
   historyTurns: number;
   limits?: BotPlayerConfig["limits"];
   paid: boolean;
@@ -96,6 +97,7 @@ export class BotManager {
       role: req.role ?? profile?.role ?? "teacher",
       level: req.level ?? profile?.level ?? "beginner",
       toolMode: profile?.toolMode ?? cfg?.toolMode ?? "native",
+      thinking: (req.thinking ?? profile?.thinking) === "off" ? "off" : "default",
       historyTurns: profile?.historyTurns ?? 4,
       paid: pub?.paid ?? false,
       local: pub?.local ?? false,
@@ -117,6 +119,7 @@ export class BotManager {
       level: resolved.level,
       toolMode: resolved.toolMode,
       historyTurns: resolved.historyTurns,
+      thinking: resolved.thinking,
       paid: resolved.paid,
       local: resolved.local,
       onMoveFailure: this.failurePolicy(),
@@ -153,7 +156,7 @@ export class BotManager {
   prepare(color: Color, req: BotSeatRequest): SeatInit {
     const resolved = this.resolve(req);
     const existing = this.players.get(color);
-    if (existing && existing.matches(resolved.providerId, resolved.model, resolved.profileId)) {
+    if (existing && existing.matches(resolved.providerId, resolved.model, resolved.profileId, resolved.thinking)) {
       // Mesmo perfil: o bot continua sentado e recebe o evento `new_game`.
       return existing.seatInit();
     }
@@ -213,7 +216,7 @@ export class BotManager {
   resume(color: Color, req?: Partial<BotSeatRequest>): BotSeatInfo {
     const seat = this.store.getState().seats[color];
     if (seat.kind !== "bot") throw new BotSeatError(409, "Esse assento não é de um bot.");
-    const wantsSwap = !!(req && (req.profileId || req.providerId || req.model));
+    const wantsSwap = !!(req && (req.profileId || req.providerId || req.model || req.thinking));
     const player = this.players.get(color);
     if (!player || wantsSwap) {
       const base: BotSeatRequest = {
@@ -224,6 +227,7 @@ export class BotManager {
         ...(req?.name ? { name: req.name } : { name: seat.name }),
         ...(req?.role ? { role: req.role } : {}),
         ...(req?.level ? { level: req.level } : {}),
+        ...(req?.thinking ? { thinking: req.thinking } : seat.bot?.thinking ? { thinking: seat.bot.thinking } : {}),
       };
       this.sit(color, base);
       return this.players.get(color)?.botInfo ?? (this.store.getState().seats[color].bot as BotSeatInfo);
@@ -264,6 +268,7 @@ export class BotManager {
         model: seat.bot.model,
         name: seat.name,
         ...(seat.bot.profileId ? { profileId: seat.bot.profileId } : {}),
+        ...(seat.bot.thinking ? { thinking: seat.bot.thinking } : {}),
       };
       try {
         const resolved = this.resolve(req);

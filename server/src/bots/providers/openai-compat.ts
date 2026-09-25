@@ -9,6 +9,10 @@
  *  - `id` ausente na tool call → gera `call_<n>`;
  *  - `<think>…</think>` de modelos com reasoning → removido do texto;
  *  - `content` como array de blocos → concatena os blocos de texto.
+ *
+ * `thinking: "off"` não tem padrão no formato OpenAI: `withThinkingOff` manda os dialetos
+ * mais comuns de uma vez. Se o servidor recusar (400/422), a chamada é refeita sem eles e o
+ * modelo fica marcado para não receber mais os campos.
  */
 import type { ModelInfo } from "../../../../shared/types.js";
 import { createLogger } from "../../log.js";
@@ -114,6 +118,38 @@ export function retryAfterMs(header: string | null, now: number): number | undef
   const date = Date.parse(header);
   if (!Number.isNaN(date)) return Math.max(0, date - now);
   return undefined;
+}
+
+/**
+ * Pede resposta sem raciocínio em todos os dialetos conhecidos (servidores ignoram o que
+ * não entendem, e quem rejeita cai no fallback do `chat`):
+ *  - `reasoning.effort: "none"` (OpenRouter, Ollama) — `reasoning_effort` quando o corpo
+ *    não traz um objeto `reasoning` do `extraBody`;
+ *  - `chat_template_kwargs.enable_thinking: false` (llama.cpp, vLLM, SGLang);
+ *  - `/no_think` no prompt de sistema dos Qwen3 (chave suave do próprio modelo; LM Studio).
+ */
+export function withThinkingOff(body: Record<string, unknown>, model: string): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...body };
+  const reasoning = out.reasoning;
+  if (reasoning && typeof reasoning === "object" && !Array.isArray(reasoning)) {
+    const { max_tokens: _max, enabled: _enabled, ...rest } = reasoning as Record<string, unknown>;
+    out.reasoning = { ...rest, effort: "none" };
+  } else {
+    out.reasoning_effort = "none";
+  }
+  const kwargs = out.chat_template_kwargs;
+  out.chat_template_kwargs = {
+    ...(kwargs && typeof kwargs === "object" && !Array.isArray(kwargs) ? kwargs : {}),
+    enable_thinking: false,
+  };
+  if (/qwen3/i.test(model) && Array.isArray(out.messages)) {
+    const messages = out.messages as Record<string, unknown>[];
+    const i = messages.findIndex((m) => m.role === "system");
+    if (i >= 0 && typeof messages[i]?.content === "string") {
+      out.messages = messages.map((m, j) => (j === i ? { ...m, content: `${m.content as string}\n/no_think` } : m));
+    }
+  }
+  return out;
 }
 
 function textFromContent(content: unknown): string {
@@ -268,6 +304,8 @@ export function createOpenAiCompatProvider(cfg: ProviderConfig, opts: OpenAiComp
   const timeout = defaultTimeoutMs(cfg);
   const baseUrl = cfg.baseUrl ?? "";
   const local = isEffectivelyLocal(cfg);
+  /** Modelos cujo servidor recusou os campos de `withThinkingOff`. */
+  const thinkingOffRejected = new Set<string>();
 
   const headers = (): Record<string, string> => {
     const h: Record<string, string> = { "Content-Type": "application/json", ...(cfg.extraHeaders ?? {}) };
@@ -360,11 +398,25 @@ export function createOpenAiCompatProvider(cfg: ProviderConfig, opts: OpenAiComp
       if (req.temperature !== undefined) body.temperature = req.temperature;
       if (req.maxTokens !== undefined) body.max_tokens = req.maxTokens;
 
-      const json = await call("/chat/completions", {
-        method: "POST",
-        body: JSON.stringify(body),
-        signal: requestSignal(timeout, req.signal),
-      });
+      const post = (payload: Record<string, unknown>): Promise<unknown> =>
+        call("/chat/completions", {
+          method: "POST",
+          body: JSON.stringify(payload),
+          signal: requestSignal(timeout, req.signal),
+        });
+      let json: unknown;
+      if (req.thinking === "off" && !thinkingOffRejected.has(req.model)) {
+        try {
+          json = await post(withThinkingOff(body, req.model));
+        } catch (err) {
+          if (!(err instanceof ProviderError && (err.status === 400 || err.status === 422))) throw err;
+          thinkingOffRejected.add(req.model);
+          log.warn(`${cfg.id}: ${req.model} recusou os campos para desligar o raciocínio (${err.shortText}); seguindo sem eles`);
+          json = await post(body);
+        }
+      } else {
+        json = await post(body);
+      }
 
       const root = (json ?? {}) as Record<string, unknown>;
       const choice = (Array.isArray(root.choices) ? root.choices[0] : undefined) as Record<string, unknown> | undefined;

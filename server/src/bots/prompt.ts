@@ -17,6 +17,7 @@ const LEVEL_PT: Record<StudentLevel, string> = {
 };
 
 const COLOR_PT: Record<Color, string> = { white: "BRANCAS", black: "PRETAS" };
+const OTHER_PT: Record<Color, string> = { white: "PRETAS", black: "BRANCAS" };
 
 export interface SystemPromptOptions {
   role: BotRole;
@@ -66,7 +67,6 @@ function nativeToolLines(opts: SystemPromptOptions): string[] {
     "COMO AGIR (ferramentas):",
     "- `make_move`: joga o seu lance. É a única forma de jogar — descrever o lance em texto NÃO move a peça.",
     "- `comment`: publica um comentário no painel de aula (sem jogar). `highlight`: desenha casas e setas.",
-    "- `get_state`: relê a posição (raramente necessário: toda mensagem já traz o estado completo).",
     '- `end_game`: só para desistir ("resign") ou aceitar um empate oferecido ("draw").',
     "- Você NÃO tem ferramentas para criar partida, entrar/sair de assento, desfazer lances ou esperar a vez: quem cuida disso é o servidor.",
   ];
@@ -94,6 +94,7 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
     "- Se o lance for recusado, leia os lances legais devolvidos e escolha um deles. Nunca repita um lance ilegal.",
     "- Uma jogada por vez. Depois de jogar, pare e espere: o servidor avisa quando for sua vez de novo.",
     `- Comentários curtos: no máximo ${words} palavras.`,
+    `- Nas mensagens do servidor, "você" é SEMPRE você, a IA que joga de ${COLOR_PT[opts.color]}; ${opts.opponentName} joga de ${OTHER_PT[opts.color]}. Ao escrever para o aluno, "você" passa a ser ele: não troque os lados (quem venceu, quem errou, de quem é cada peça).`,
   ];
 
   if (vsBot) {

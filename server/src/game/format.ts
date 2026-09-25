@@ -24,6 +24,8 @@ export interface FormatOptions {
   nextAction?: string;
   /** Mensagens a exibir (default: pendentes no estado para `perspective`). */
   messages?: HumanMessage[];
+  /** Tabuleiro ASCII (default: true). Os bots dispensam: FEN + lista de peças já bastam. */
+  board?: boolean;
 }
 
 const COLOR_UPPER: Record<Color, string> = { white: "BRANCAS", black: "PRETAS" };
@@ -98,9 +100,12 @@ export function resultText(state: GameState, perspective: Color | null): string 
   if (state.status !== "finished") return "em andamento";
   const reason = state.endReason ? END_REASON_PT[state.endReason] : "encerrada";
   if (state.winner) {
-    const who =
-      perspective === state.winner ? "você venceu" : perspective ? "você perdeu" : `${COLOR_LOWER[state.winner]} venceram`;
-    return `${state.result} — ${reason}: ${who}`;
+    // Sempre cor + nome de quem venceu: um "você perdeu" solto é lido pela LLM como se fosse
+    // sobre o aluno, a quem ela também chama de "você".
+    const winner = `${COLOR_LOWER[state.winner]} (${seatName(state, state.winner, null)}) venceram`;
+    if (!perspective) return `${state.result} — ${reason}: ${winner}`;
+    const mine = perspective === state.winner ? "venceu" : "perdeu";
+    return `${state.result} — ${reason}: ${winner}; você jogou de ${COLOR_LOWER[perspective]} e ${mine}`;
   }
   if (state.result === "1/2-1/2") return `${state.result} — ${state.endReason === "draw_agreed" ? reason : `empate por ${reason}`}`;
   return `sem resultado — ${reason}`;
@@ -262,8 +267,10 @@ export function formatStateForLLM(state: GameState, perspective: Color | null, o
     lines.push(
       `Capturadas: brancas tomaram ${capturedList(state.captured.byWhite)} · pretas tomaram ${capturedList(state.captured.byBlack)}`,
     );
-    lines.push("");
-    lines.push(state.ascii.replace(/\s+$/, ""));
+    if (opts.board !== false) {
+      lines.push("");
+      lines.push(state.ascii.replace(/\s+$/, ""));
+    }
   }
 
   lines.push("");

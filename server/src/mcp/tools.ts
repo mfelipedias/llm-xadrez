@@ -49,6 +49,7 @@ const botSeatInfoSchema = z.object({
   model: z.string(),
   profileId: z.string().optional(),
   toolMode: z.enum(["native", "text"]),
+  thinking: z.enum(["default", "off"]).optional(),
   status: z.enum(["idle", "waiting", "thinking", "acting", "error", "budget_exceeded", "stopped"]),
   statusText: z.string().optional(),
   thinkingSince: z.string().optional(),

@@ -5,10 +5,10 @@
  * Nada aqui conhece xadrez, e nada aqui guarda chave de API: a chave é injetada pelo
  * registry a partir do ambiente e nunca é serializada.
  */
-import type { ModelInfo, ProviderKind, ToolMode } from "../../../../shared/types.js";
+import type { ModelInfo, ProviderKind, ThinkingMode, ToolMode } from "../../../../shared/types.js";
 import { isLocalUrl } from "./net.js";
 
-export type { ModelInfo, ProviderKind, ToolMode };
+export type { ModelInfo, ProviderKind, ThinkingMode, ToolMode };
 
 export interface ToolSpec {
   name: string;
@@ -41,6 +41,8 @@ export interface ChatRequest {
   toolChoice?: "auto" | "none" | { name: string };
   temperature?: number;
   maxTokens?: number;
+  /** `off`: cada adaptador traduz para o dialeto do provedor (sem garantia de que o modelo obedeça). */
+  thinking?: ThinkingMode;
   signal?: AbortSignal;
 }
 

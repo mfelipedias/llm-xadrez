@@ -8,7 +8,7 @@
  * está no `.env`, a UI mostra o nome da variável que falta e nada mais (§6).
  */
 import { useEffect, useId, useState } from "react";
-import type { BotProfile, ModelInfo, ProviderPublic } from "@shared/types";
+import type { BotProfile, ModelInfo, ProviderPublic, ThinkingMode } from "@shared/types";
 import { api } from "../api";
 import { limitsOf } from "../bots";
 
@@ -17,6 +17,8 @@ export interface BotChoice {
   profileId?: string;
   providerId?: string;
   model?: string;
+  /** Ausente = o do perfil (ou `default`). */
+  thinking?: ThinkingMode;
 }
 
 export interface BotPickerProps {
@@ -32,6 +34,11 @@ export interface BotPickerProps {
 /** Perfil escolhido, se houver. */
 export function chosenProfile(profiles: BotProfile[], value: BotChoice): BotProfile | null {
   return value.profileId ? (profiles.find((p) => p.id === value.profileId) ?? null) : null;
+}
+
+/** Raciocínio efetivo: a escolha explícita vence o perfil. */
+export function chosenThinking(profiles: BotProfile[], value: BotChoice): ThinkingMode {
+  return value.thinking ?? chosenProfile(profiles, value)?.thinking ?? "default";
 }
 
 /** Provedor que este `BotChoice` vai usar de fato. */
@@ -94,6 +101,10 @@ export function BotPicker({ idPrefix, providers, profiles, value, onChange, lege
     };
   }, [custom, providerId]);
 
+  // Trocar de perfil/modelo não desfaz a escolha de raciocínio feita aqui.
+  const keep = value.thinking ? { thinking: value.thinking } : {};
+  const thinkingOff = chosenThinking(profiles, value) === "off";
+
   const missingKey = provider?.apiKeyEnv && !provider.hasApiKey ? provider.apiKeyEnv : null;
 
   return (
@@ -105,7 +116,7 @@ export function BotPicker({ idPrefix, providers, profiles, value, onChange, lege
             type="button"
             className={`chip${value.profileId === profile.id ? " is-active" : ""}`}
             aria-pressed={value.profileId === profile.id}
-            onClick={() => onChange({ profileId: profile.id })}
+            onClick={() => onChange({ profileId: profile.id, ...keep })}
           >
             {profile.name}
           </button>
@@ -114,7 +125,7 @@ export function BotPicker({ idPrefix, providers, profiles, value, onChange, lege
           type="button"
           className={`chip${custom ? " is-active" : ""}`}
           aria-pressed={custom}
-          onClick={() => onChange({ providerId, model: value.model ?? "" })}
+          onClick={() => onChange({ providerId, model: value.model ?? "", ...keep })}
         >
           Outro modelo…
         </button>
@@ -127,7 +138,7 @@ export function BotPicker({ idPrefix, providers, profiles, value, onChange, lege
             <select
               id={`${base}-provider`}
               value={providerId}
-              onChange={(ev) => onChange({ providerId: ev.target.value, model: "" })}
+              onChange={(ev) => onChange({ providerId: ev.target.value, model: "", ...keep })}
             >
               {providers.length === 0 && <option value="">nenhum provedor configurado</option>}
               {providers.map((item) => (
@@ -150,7 +161,7 @@ export function BotPicker({ idPrefix, providers, profiles, value, onChange, lege
               placeholder={models[0]?.id ?? "id do modelo no provedor"}
               spellCheck={false}
               autoComplete="off"
-              onChange={(ev) => onChange({ providerId, model: ev.target.value })}
+              onChange={(ev) => onChange({ providerId, model: ev.target.value, ...keep })}
             />
           </label>
           {models.length > 0 && (
@@ -164,6 +175,19 @@ export function BotPicker({ idPrefix, providers, profiles, value, onChange, lege
           )}
         </div>
       )}
+
+      <label className="botpicker-thinking" htmlFor={`${base}-thinking`}>
+        <input
+          id={`${base}-thinking`}
+          type="checkbox"
+          checked={thinkingOff}
+          onChange={(ev) => onChange({ ...value, thinking: ev.target.checked ? "off" : "default" })}
+        />
+        <span>
+          Jogar sem pensar
+          <small>Desliga o raciocínio do modelo: lances bem mais rápidos, em geral um pouco mais fracos.</small>
+        </span>
+      </label>
 
       {missingKey && (
         <p className="botpicker-note is-bad">

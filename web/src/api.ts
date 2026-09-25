@@ -20,6 +20,7 @@ import type {
   ResignRequest,
   ServerInfo,
   TakebackRequest,
+  ThinkingMode,
   WsServerMessage,
 } from "@shared/types";
 import { MockHttpError, mockFixture, mockRequest } from "./dev/fixtures";
@@ -171,6 +172,7 @@ export interface BotSeatBody {
   providerId?: string;
   model?: string;
   name?: string;
+  thinking?: ThinkingMode;
 }
 
 export type { ProvidersResponse, ProviderTestResponse, ProviderUpsert };

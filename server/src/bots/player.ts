@@ -15,6 +15,7 @@ import type {
   BotSeatInfo,
   Color,
   StudentLevel,
+  ThinkingMode,
   ToolMode,
   TurnEvent,
 } from "../../../shared/types.js";
@@ -56,6 +57,8 @@ export interface BotPlayerConfig {
   local?: boolean;
   language?: string;
   maxTokens?: number;
+  /** `off` pede ao provedor resposta sem raciocínio. */
+  thinking?: ThinkingMode;
 }
 
 export interface BotPlayerDeps {
@@ -140,6 +143,7 @@ export class BotPlayer {
       status: "idle",
       usage: this.budget.usage,
       ...(cfg.profileId ? { profileId: cfg.profileId } : {}),
+      ...(cfg.thinking === "off" ? { thinking: cfg.thinking } : {}),
     };
   }
 
@@ -166,9 +170,14 @@ export class BotPlayer {
     return { kind: "bot", name: this.cfg.name, sessionId: this.sessionId, bot: this.botInfo };
   }
 
-  /** Mesmo provedor/modelo/perfil? (para reaproveitar o bot numa nova partida). */
-  matches(providerId: string, model: string, profileId?: string): boolean {
-    return this.cfg.providerId === providerId && this.cfg.model === model && (this.cfg.profileId ?? "") === (profileId ?? "");
+  /** Mesmo provedor/modelo/perfil/raciocínio? (para reaproveitar o bot numa nova partida). */
+  matches(providerId: string, model: string, profileId?: string, thinking?: ThinkingMode): boolean {
+    return (
+      this.cfg.providerId === providerId &&
+      this.cfg.model === model &&
+      (this.cfg.profileId ?? "") === (profileId ?? "") &&
+      (this.cfg.thinking ?? "default") === (thinking ?? "default")
+    );
   }
 
   /* ---------------------------- ciclo de vida ------------------------- */
@@ -278,7 +287,7 @@ export class BotPlayer {
       this.rounds = [];
       return;
     }
-    this.rounds.push(round);
+    this.rounds.push(compactRound(round));
     if (this.rounds.length > keep) this.rounds.splice(0, this.rounds.length - keep);
   }
 
@@ -394,7 +403,7 @@ export class BotPlayer {
 
   private async playTurn(ev: TurnEvent, mode: RoundMode, signal: AbortSignal): Promise<void> {
     const state = this.store.getState();
-    const eventText = formatTurnEvent(ev, state, this.color, this.lang ? { lang: this.lang } : {});
+    const eventText = formatTurnEvent(ev, state, this.color, { board: false, ...(this.lang ? { lang: this.lang } : {}) });
     const userMessage = (): ChatMessage => ({
       role: "user",
       content: `${eventText}\n\n${this.activeToolMode === "text" ? textModeTurnInstruction(mode) : turnInstruction(mode, this.cfg.role)}`,
@@ -567,6 +576,7 @@ export class BotPlayer {
           ...(tools?.length ? { tools } : {}),
           ...(temperature !== undefined ? { temperature } : {}),
           ...(this.cfg.maxTokens !== undefined ? { maxTokens: this.cfg.maxTokens } : {}),
+          ...(this.cfg.thinking === "off" ? { thinking: "off" as const } : {}),
         });
       } catch (err) {
         lastError = err;
@@ -655,4 +665,27 @@ export class BotPlayer {
     this.setStatus("error", reason);
     this.paused = true;
   }
+}
+
+/**
+ * Versão da rodada guardada no histórico: o estado completo (FEN, peças, lances legais) já
+ * está desatualizado na rodada seguinte, que traz o seu próprio. Fica o que dá continuidade
+ * à conversa — o evento, o que o bot disse e jogou e a 1ª linha de cada resultado de tool —
+ * com a sequência de mensagens intacta (tool calls continuam pareadas com os resultados).
+ */
+export function compactRound(round: ChatMessage[]): ChatMessage[] {
+  return round.map((msg, i) => {
+    if (msg.role === "user" && i === 0) {
+      const cut = msg.content.indexOf("\n\n# Partida");
+      if (cut < 0) return msg;
+      // As palavras do aluno ficam no bloco de estado: são a parte da conversa que não pode sumir.
+      const said = /\n\n(Mensagens do aluno[^\n]*(?:\n - [^\n]*)*)/.exec(msg.content.slice(cut));
+      return { ...msg, content: msg.content.slice(0, cut) + (said ? `\n${said[1]}` : "") };
+    }
+    if (msg.role === "tool") {
+      const cut = msg.content.indexOf("\n");
+      return cut >= 0 ? { ...msg, content: msg.content.slice(0, cut) } : msg;
+    }
+    return msg;
+  });
 }

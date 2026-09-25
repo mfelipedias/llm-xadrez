@@ -106,9 +106,10 @@ export function NewGameDialog({ server, onClose, onSubmit, onOpenProviders }: Ne
     const draft = seats[color];
     if (draft.kind === "human") return name.trim() ? { kind: "human", name: name.trim() } : { kind: "human" };
     if (draft.kind === "mcp") return { kind: "mcp" };
-    const { profileId, providerId, model } = draft.bot;
-    if (profileId) return { kind: "bot", profileId };
-    return { kind: "bot", providerId: providerId ?? "", model: model ?? "" };
+    const { profileId, providerId, model, thinking } = draft.bot;
+    const extra = thinking ? { thinking } : {};
+    if (profileId) return { kind: "bot", profileId, ...extra };
+    return { kind: "bot", providerId: providerId ?? "", model: model ?? "", ...extra };
   };
 
   const submit = async (ev: FormEvent) => {
